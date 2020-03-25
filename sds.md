@@ -90,16 +90,73 @@ void sdsfree(sds s);
 其中`sdsnewlen`函数，是这一系列函数的基础，其作用是，给定一段初始化内存的头指针init，
 以及初始长度initlen，构建一个sds数据。这个函数会根据你需要初始化数据的长度initlen通过`sdsReqType`来选择
 所使用的HeaderType，8位，16位，32位还是64位，使用`s_malloc`调用，为其分配长度为`headerSize + initlen + 1`
-的缓存，同时初始话Header中的type,len,alloc字段，并将init所指向的数据调用memcpy拷贝到sds的缓冲区中，
+的缓存，同时初始话Header中的type,len,alloc字段，并将init所指向的数据调用`memcpy`拷贝到sds的缓冲区中，
 同时以`\0`作为结束标记(null-termined)。
 
 后续的三个接口都是通过调用sdsnewlen来完成相关功能的。
-`sdsempty`函数用来创建一个空的sds数据
-`sdsnew`函数可以从一个null-terminated的C风格字符串中创建一个sds数据
-`sdsdup`函数可以通过一个给定的sds数据，复制出一个新的sds数据并返回
+* `sdsempty`函数用来创建一个空的sds数据
+* `sdsnew`函数可以从一个null-terminated的C风格字符串中创建一个sds数据
+* `sdsdup`函数可以通过一个给定的sds数据，复制出一个新的sds数据并返回
 
 最后一个借口`sdsfree`函数通过调用s_free接口来释放一个给定的sds数据，
 需要注意的是，所释放的内容包括sds头指针，以及其前面的Header数据。
 
 
 ## 用于调整Strings长度信息的操作函数
+```c
+void sdsupdatelen(sds s);
+```
+通过对内部数据调用strlen来更新sds的长度，这个接口在sds缓存被手动改写的情况下很有用
+
+```c
+void sdsclear(sds s);
+```
+用于清空一个sds数据的内容，但是不会释放已经存在的缓存。可以理解为内容和长度清零，但是空间还在。
+
+```c
+sds sdsMakeRoomFor(sds s, size_t addlen);
+```
+这个接口用于增大一个给定sds数据的可用空间，可以让确保玩家在调用改接口之后，可以向缓存之中续写
+addlen个字节的内容，但是这个操作不会改变已经使用的缓存的大小，也就是不会改变sdslen调用的结果。
+其中几个细节点：
+1. 如果当前sds的可用空间也就是sdsavail的大小大于addlen，那么该函数什么操作也不会执行。
+2. 如果当前操作没有引起Header的升级，例如从8位Header升级到16位，那么会调用s_realloc接口为其增加缓存容量。
+3. 如果引发了Header的升级，那么会调用s_malloc接口来分配一个新的sds，将原始数据拷贝进去，返回新的sds数据。
+
+```c
+sds sdsRemoveFreeSpace(sds s);
+```
+这个接口的用途是收缩sds的缓存大小，使之刚好保存sdslen大小的数据，而没有多余的可用空间
+其中的细节点：
+1. 如果收缩导致Header的降级，那么调用s_malloc接口重新分配一个新的sds，拷贝数据后，返回新的sds
+2. 如果收缩没有导致Header的降级，那么直接调用s_realloc接口调整缓存大小，实现容量收缩
+
+```c
+size_t sdsAllocSize(sds s);
+```
+这个接口用与返回分配给指定sds数据的内存的总大小，
+其中包含:
+1. s指针前的Header的大小
+2. string数据的大小
+3. 可用空间的大小
+4. 强制结束符`\0`的大小
+
+```
+void\* sdsAllocPtr(sds s);
+```
+这个接口返回一个sds数据直接被分配的头指针，也就是Header首个字节的指针。
+
+```c
+void sdsIncrLen(sds s, ssize_t incr);
+```
+可以理解为可以给指定的sds的len增加incr的长度，同时会导致sdsavail的可用空间减少
+基本应用场景:
+1. 调用`sdsMakeRoomFor`函数为sds扩容
+2. 向sds的缓存之中写入数据
+3. 调用`sdsIncrLen`函数，调整写入数据之后的sdslen长度
+同时需要注意incr的大小，不能超过sdsavail的大小，否则会触发断言机制
+
+```c
+sds sdsgrowzero(sds s, size_t len);
+```
+内部通过调用`sdsMakeRoomFor`将sds的缓存区增加len的长度，同时将新增的缓冲区初始化为0。
