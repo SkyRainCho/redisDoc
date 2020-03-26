@@ -1,20 +1,21 @@
 # Redis中的C语言动态Strings库
 
-这个库主要是用来描述Redis之中的五个基本类型之一的String，
-Redis使用 `typedef char *sds;` 来描述这个动态String，
-其在内存中的分布格式为一个StringHeader以及在StringHeader后面
-一段连续的动态内存，而`sds`则是指向StringHeader后面的连续内存的第一个字节。
+这个库主要是用来描述*Redis*之中的五个基本类型之一的*String*，
+*Redis*使用 `typedef char *sds;` 来描述这个动态*String*，
+其在内存中的分布格式为一个*StringHeader*以及在*StringHeader*后面
+一段连续的动态内存，而`sds`则是指向*StringHeader*后面的连续内存的第一个字节。
 
 ## Strings的头部信息
 
-sds的头部信息主要包含了sds被分配的缓存大小以及已经使用的缓存的大小，
-在Redis中定义了五种sds的头部信息：
-* sdshdr5，定义了类型SDS_TYPE_5
-* sdshdr8，定义了类型SDS_TYPE_8
-* sdshdr16，定义了类型SDS_TYPE_16
-* sdshdr32，定义了类型SDS_TYPE_32
-* sdshdr64，定义了类型SDS_TYPE_64
-其中sdshdr5从来不被使用，其余的头部信息都是按照如下格式（以sdshdr32为例）进行定义的：
+`sds`的头部信息主要包含了`sds`被分配的缓存大小以及已经使用的缓存的大小，
+在*Redis*中定义了五种`sds`的头部信息：
+* `sdshdr5`，定义了类型`SDS_TYPE_5`
+* `sdshdr8`，定义了类型`SDS_TYPE_8`
+* `sdshdr16`，定义了类型`SDS_TYPE_16`
+* `sdshdr32`，定义了类型`SDS_TYPE_32`
+* `sdshdr64`，定义了类型`SDS_TYPE_64`
+
+其中`sdshdr5`从来不被使用，其余的头部信息都是按照如下格式（以`sdshdr32`为例）进行定义的：
 ```c
 struct __attribute__ ((__packed__)) sdshdr32
 {
@@ -27,24 +28,24 @@ struct __attribute__ ((__packed__)) sdshdr32
 
 ## Strings的通用底层操作
 
-在头文件之中定义了若干个宏以及静态函数用于实现对于sds的基础操作。
+在头文件之中定义了若干个宏以及静态函数用于实现对于`sds`的基础操作。
 ```c
 #define SDS_HDR(T,s) ((struct sdshdr##T *)((s)-(sizeof(struct sdshdr##T))))
 ```
-给定一个sds数据，使用`SDS_HDR`来获取其对应的`sdshdr`的头指针。
+给定一个`sds`数据，使用`SDS_HDR`来获取其对应的`sdshdr`的头指针。
 
 ```c
 #define SDS_HDR_VAR(T,s) struct sdshdr##T *sh = (void*)((s)-(sizeof(struct sdshdr##T)));
 ```
-给定一个sds数据，声明一个`sdshdr`指针变量`sh`，并将这个sds对应的`sdshdr`头指正赋值给这个`sh`变量。
+给定一个`sds`数据，声明一个`sdshdr`指针变量`sh`，并将这个sds对应的`sdshdr`头指正赋值给这个`sh`变量。
 
 ```c
 static inline size_t sdslen(const sds s);
 ```
-给定一个sds数据，获取其已使用缓存的长度，具体的实现方式为：
-1. 结合sdshdr的定义，以及sds在内存中的分布结构，通过`s[-1]`来获取header中的flags数据。
-2. 根据flags计算出其对应的是什么类型的shshdr。
-3. 调用宏`SDS_HDR`获取到对应的header的指针，进而获得`len`字段数据。
+给定一个`sds`数据，获取其已使用缓存的长度，具体的实现方式为：
+1. 结合`sdshdr`的定义，以及`sds`在内存中的分布结构，通过`s[-1]`来获取*StringHeader*中的`flags`数据。
+2. 根据`flags`计算出其对应的是什么类型的`shshdr`。
+3. 调用宏`SDS_HDR`获取到对应的*StringHeader*的指针，进而获得`len`字段数据。
 
 ```c
 static inline size_t sdsalloc(const sds s);
@@ -214,3 +215,30 @@ sds sdscatfmt(sds s, char const* fmt, ...);
 |`%u`|unsigned int 无符号整数|
 |`%U`|64位无符号整数|
 |`%%`||
+
+```c
+sds sdstrim(sds s, const char *cset);
+```
+给定一个C风格的字符集合`cset`，以及一个特定的`sds`数据，去除这个`sds`中前后属于这个`cset`的字符，
+并返回更新后的`sds`数据。需要注意的是，这个移除操作，在遇到第一个不属于`cset`的字符时结束
+
+```c
+void sdsrange(sds s, sszie_t start, ssize_t end);
+```
+给定一个特定的`sds`数据，以及一个*range*的`[start, end]`，将这个`sds`数据缩小成符合这个*range*的子串。
+*range*的范围可以是负值，其含义可以参考*Python*中对于列表的切片操作。
+
+```c
+void sdstolower(sds s);
+void sdstoupper(ssd s);
+```
+上述两个操作是给定一个`sds`数据，对于其内部的每一个字符调用`tolower`或者`toupper`操作。
+
+```c
+int sdscmp(const sds s1, const sds s2);
+```
+内部通过调用`memcmp`来比较两个`sds`数据的大小：
+* 如果`s1 > s2`，返回一个正数。
+* 如果`s1 < s2`，返回一个负数。
+* 如果两个`sds`的二进制数据完全相同，那么这个函数返回0。
+
