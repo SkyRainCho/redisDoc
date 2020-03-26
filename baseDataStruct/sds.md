@@ -141,8 +141,8 @@ size_t sdsAllocSize(sds s);
 3. 可用空间的大小
 4. 强制结束符`\0`的大小
 
-```
-void\* sdsAllocPtr(sds s);
+```c
+void* sdsAllocPtr(sds s);
 ```
 这个接口返回一个sds数据直接被分配的头指针，也就是Header首个字节的指针。
 
@@ -160,3 +160,57 @@ void sdsIncrLen(sds s, ssize_t incr);
 sds sdsgrowzero(sds s, size_t len);
 ```
 内部通过调用`sdsMakeRoomFor`将sds的缓存区增加len的长度，同时将新增的缓冲区初始化为0。
+
+## 用于处理Strings内容的操作函数
+
+```c
+sds sdscatlen(sds s, const void *t, size_t len);
+```
+向sds数据中扩展一段二进制安全的数据，t为这段数据的指针，len为需要扩展的长度，
+其内部会通过调用`sdsMakeRoomFor`尝试将sds的缓冲区进行扩展。
+
+```c
+sds sdscat(sds s, const char *t);
+```
+通过内部调用`sdscatlen`函数来实现向sds中扩展一个C风格字符串。
+
+```c
+sds sdscpylen(sds s, const char *t, size_t len);
+sds sdscpy(sds s, const chart *t);
+```
+实现了向sds数据中复制数据的功能，与memcpy接口类似，会覆盖已有的数据。
+上述两个函数分别实现了二进制安全数据的拷贝以及C风格字符串的拷贝。
+
+```c
+int sdsll2str(char *s, long long value);
+int sdsull2str(char *s, unsigned long long value);
+```
+上述两个函数分别用于将有符号和无符号的long long整数转化为字符串，同时返回字符串长度。
+注意其内部有一个自己实现的字符串翻转算法。
+
+```c
+sds sdsfromlonglong(long long value);
+```
+从一个long long整形数构建一个sds数据，类似调用`int sprintf(char *str, const char *format, ...)`
+将一个整形数字写入一个字符串。
+
+```c
+sds sdscatvprintf(sds s, const char *fmt, va_list ap);
+sds sdscatprintf(sds s, const char *fmt, ...);
+sds sdscatfmt(sds s, char const* fmt, ...);
+```
+类似使用`printf`的调用的方式，将一个格式化C风格字符串添加到sds的结尾
+需要注意的是，作为参数传入的s，在函数执行成功后已不能保证有效性，
+应使用`s = sdscatprintf(s. "1");`这样的方式进行操作。
+另外`sdscatfmt`函数是是一个与`sdscatprintf`类似的接口，但是其执行的速度要更快
+原因在与其没依赖与libc库所提供的`sprintf()`族函数，而这一组操作通常是很慢的。
+但是其只支持特定的几种通配符：
+| 通配符 | 含义 |
+|:------|:-----|
+|`%s`|C风格字符串|
+|`%S`|SDS字符串|
+|`%i`|signed int 有符号整数|
+|`%I`|64位有符号整数|
+|`%u`|unsigned int 无符号整数|
+|`%U`|64位无符号整数|
+|`%%`||
