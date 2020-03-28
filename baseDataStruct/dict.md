@@ -81,3 +81,11 @@ typedef struct dict {
 |`#define dictHashKey(d, key)`|为`key`计算其对应的哈希值|
 
 ## Redis哈希表的构造与初始化接口
+
+```c
+static void _dictReset(dictht *ht);
+int _dictInit(dict *d, dictType *type, void *privDataPtr);
+```
+其中`_dictReset`函数对一个给定的`dictht`进行重置初始化。
+`_dictInit`函数，使用一个`dictType`以及一个私有数据指针`privDataPtr`来初始化一个`dict`数据。
+
