@@ -32,7 +32,7 @@ typedef struct dictEntry
 ```c
 typedef struct dictht {
     dictEntry **table;        //table是一个数组结构，其中的每个元素都是一个dictEntry指针
-    unsigned long size;       //
+    unsigned long size;       //table中桶的数量
     unsigned long sizemask;   //
     unsigned long used;       //
 } dictht;
@@ -66,5 +66,18 @@ typedef struct dict {
 
 
 ## Redis哈希表的基础底层操作
+
+在*src/dict.h*头文件之中，*Redis*定义了一组用于完成基本底层操作的宏：
+| 宏定义 | 具体含义 |
+|-------|---------|
+|`#define dictFreeVal(d, entry)`|使用`dict`中`type`的`valDestructor`来释放`entry`节点的`v.val`|
+|`#define dictSetVal(d, entry, _val_)`|为`entry`中的`v.val`进行赋值|
+|`#define dictSetSignedIntegerVal(entry, _val_)`|为`entry`中的`v.u64`进行赋值|
+|`#define dictSetUnsignedIntegerVal(entry, _val_)`|为`entry`中的`v.s64`进行赋值|
+|`#define dictSetDoubleVal(entry, _val_)`|为`entry`中的`v.d`进行赋值|
+|`#define dictFreeKey(d, entry)`|使用`dict`中`type`的`valDestructor`来释放`entry`节点的`key`|
+|`#define dictSetKey(d, entry, _key_)`|为`entry`中的`key`进行赋值|
+|`#define dictCompareKeys(d, key1, key2)`|对`key1`和`key2`进行比较|
+|`#define dictHashKey(d, key)`|为`key`计算其对应的哈希值|
 
 ## Redis哈希表的构造与初始化接口
