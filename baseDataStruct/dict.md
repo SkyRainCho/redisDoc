@@ -198,12 +198,13 @@ static void _dictRehashStep(dict *d);
         dictRehash(d,1);
 ```
 
-### Redis用于向哈希表中添加删除元素的操作接口
+### Redis用于向哈希表中添加删除搜索元素的操作接口
 ```c
 static long _dictKeyIndex(dict *d, const void *key, uint64_t hash, dictEntry **existing);
 dictEntry *dictAddRaw(dict *d, void *key, dictEntry **existing);
 int dictAdd(dict *d, void *key, void *val);
 int dictReplace(dict *d, void *key, void *val);
+dictEntry *dictFind(dict *d, const void *key);
 dictEntry *dictAddOrFind(dict *d, void *key);
 static dictEntry *dictGenericDelete(dict *d, const void *key, int nofree);
 int dictDelete(dict *ht, const void *key);
@@ -243,3 +244,11 @@ void dictFreeUnlinkedEntry(dict *d, dictEntry *he);
     ht->table[index] = entry;
     ht->used++;
 ```
+
+函数`dictAdd`执行了最简单插入操作，如果成功，就调用`dictSetVal`设置*val*，否则的话，返回`DICT_ERR`
+
+而函数`dictReplace`执行的是一个插入或者覆盖的操作，如果是插入新元素，那么放回1，如果覆盖已有元素，则返回0。
+
+函数`dictAddOrFind`可以让我们给定一个`key`来查找这个指定`key`对应的`dictEntry`指针，如果`key`不存在`dict`中，
+那么会想其中插入一个`dictEntry`，并返回。
+而函数`dictFind`，会根绝给定的`key`来查找对应的`dictEntry`，如果查找不到，会返回`NULL`。
