@@ -96,15 +96,109 @@ typedef struct dict {
 
 ## Redis哈希表的构造与初始化接口
 
+### Redis用于初始化创建与释放清理哈希表的接口
 ```c
 static void _dictReset(dictht *ht);
 int _dictInit(dict *d, dictType *type, void *privDataPtr);
+int _dictClear(dict *d, dictht *ht, void(callback)(void *));
 ```
 其中`_dictReset`函数对一个给定的`dictht`进行重置初始化。
 `_dictInit`函数，使用一个`dictType`以及一个私有数据指针`privDataPtr`来初始化一个`dict`数据。
 
 ```c
 dict *dictCreate(dictType *type, void *privDataPtr);
+void dictRelease(dict *d);
 ```
 通过这个接口，给定一个`dictType`以及一个私有内存数据的指针，内部通过调用`_dictInit`，
 最终创建一个`dict`数据。
+
+### Redis用于扩展哈希表容量的接口
+```c
+static unsigned long _dictNextPower(unsigned long size);
+static int _dictExpandIfNeeded(dict *ht);
+int dictExpand(dict *d, unsigned long size);
+int dictResize(dict *d);
+```
+`__dictNextPower`用于通过给定的`size`来计算需要扩容的大小，从`DICT_HT_INITIAL_SIZE`开始，
+每次翻倍，知道找到第一个大于等于`size`的数值，即为扩容后的大小。
+
+在我们对一个`dict`数据添加一个新的*key-value*时，都会尝试调用`_dictExpandIfNeeded`来尝试，
+是否需要对于`dict`进行扩容，其判断是否需要扩容，则依照下面的两种情况进行判断:
+1. 如果这个`dict`中的哈希表是空的情况，那么会将哈希表扩容到`DICT_HT_INITIAL_SIZE`:
+```c
+    if (d->ht[0].size == 0) 
+        return dictExpand(d, DICT_HT_INITIAL_SIZE);
+```
+2. 在元素个数以及桶数量的比例达到*1:1*的情况下，如果设置了`dict_can_resize`，
+或者装载因子超过了`dict_force_resize_ratio`。
+```c
+    if (d->ht[0].used >= d->ht[0].size &&
+        (dict_can_resize || d->ht[0].used/d->ht[0].size > dict_force_resize_ratio))
+    {
+        return dictExpand(d, d->ht[0].used*2);
+    }
+```
+
+而函数`dictExpand`则会根据给定的`size`对这个`dict`进行扩容，*Redis*会根据`size`计算出真正的调整容量:
+```c
+    unsigned long realsize = _dictNextPower(size);
+```
+如果`dict`中的第一个哈希表为空，表明这是创建一个新的哈希表的操作，那么直接将扩容出的哈希表赋值给第一个哈希表：
+```c
+    if (d->ht[0].table == NULL) {
+        d->ht[0] = n;
+        return DICT_OK;
+    }
+```
+否则的话，意味着需要对这个`dict`进行重哈希操作，将扩容出的哈希表赋值给`dict`的第二个哈希表，同时设置`rehashidx`。
+```c
+    d->ht[1] = n;
+    d->rehashidx = 0;
+    return DICT_OK;
+```
+而函数`dictResize`会将这个`dict`调整至最小的可以容纳所有元素的大小。
+
+### Redis用于进行重哈希的操作接口
+```c
+int dictRehash(dict *d, int n);
+int dictRehashMilliseconds(dict *d, int ms);
+static void _dictRehashStep(dict *d);
+```
+其中`dictRehash`函数，是重哈希操作的基础，其含义是给定一个`dict`数据以及需要重哈希的元素的个数`n`,
+由于哈希表中会存在空的桶，如果这一次重哈希操作遍历到`10 * n`个空的桶时，终止这次重哈希操作。
+当需要进行重哈希操作时，其基础逻辑是，`rehashidx`表示当前操作的第一个哈希表中桶的位置索引，
+把第一个哈希表中的某个元素移动到第二个哈希表中：
+```c
+    de = d->ht[0].table[d->rehashidx];
+    /* Move all the keys in this bucket from the old to the new hash HT */
+    while(de) {
+        uint64_t h;
+
+        nextde = de->next;
+        /* Get the index in the new hash table */
+        h = dictHashKey(d, de->key) & d->ht[1].sizemask;
+        de->next = d->ht[1].table[h];
+        d->ht[1].table[h] = de;
+        d->ht[0].used--;
+        d->ht[1].used++;
+        de = nextde;
+    }
+    d->ht[0].table[d->rehashidx] = NULL;
+    d->rehashidx++;
+```
+当第一个哈希表中所有的元素都已经转移到第二个哈希表时，会把第二个哈希表转移给第一个哈希表，
+同时重置`rehashidx`，并返回0表示重哈希已经结束。当还有元素没有进行重哈希时，会返回1。
+
+而`dictRehashMilliseconds`会在1毫秒的时间片内，执行若干次`dictRehash`操作，直到所有数据都已经重哈希，
+或者执行时间超过1毫秒的时间片。
+### Redis用于向哈希表中添加删除元素的操作接口
+```c
+dictEntry *dictAddRaw(dict *d, void *key, dictEntry **existing);
+int dictAdd(dict *d, void *key, void *val);
+int dictReplace(dict *d, void *key, void *val);
+dictEntry *dictAddOrFind(dict *d, void *key);
+static dictEntry *dictGenericDelete(dict *d, const void *key, int nofree);
+int dictDelete(dict *ht, const void *key);
+dictEntry *dictUnlink(dict *ht, const void *key);
+void dictFreeUnlinkedEntry(dict *d, dictEntry *he);
+```
