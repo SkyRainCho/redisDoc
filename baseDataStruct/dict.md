@@ -191,8 +191,16 @@ static void _dictRehashStep(dict *d);
 
 而`dictRehashMilliseconds`会在1毫秒的时间片内，执行若干次`dictRehash`操作，直到所有数据都已经重哈希，
 或者执行时间超过1毫秒的时间片。
+
+`_dictRehashStep`函数是一个通常在内部调用的函数，如果在没有安全迭代器的情况下，这个函数会对其中1个元素执行重哈希:
+```c
+    if (d->iterators == 0) 
+        dictRehash(d,1);
+```
+
 ### Redis用于向哈希表中添加删除元素的操作接口
 ```c
+static long _dictKeyIndex(dict *d, const void *key, uint64_t hash, dictEntry **existing);
 dictEntry *dictAddRaw(dict *d, void *key, dictEntry **existing);
 int dictAdd(dict *d, void *key, void *val);
 int dictReplace(dict *d, void *key, void *val);
@@ -201,4 +209,37 @@ static dictEntry *dictGenericDelete(dict *d, const void *key, int nofree);
 int dictDelete(dict *ht, const void *key);
 dictEntry *dictUnlink(dict *ht, const void *key);
 void dictFreeUnlinkedEntry(dict *d, dictEntry *he);
+```
+其中`_dictKeyIndex`函数是一个基础的底层操作，给定一个`key`以及其对应的`hash`值，
+获取这个返回其所应该放置的桶的索引，如果这个`key`已经存在，那么返回-1，
+同时在`key`已经存在的情况下，如果传入了`existing`，那么这个对应的已存在`dictEntry`会被赋值给`existing`。
+有一点需要注意的是，如果`dict`没有处在重哈希状态中，那么只会在第一个哈希表中进行查找，否则会在两个哈希表中都进行查找。
+```c
+    for (table = 0; table <= 1; table++) {
+        idx = hash & d->ht[table].sizemask;
+        /* Search if this slot does not already contain the given key */
+        he = d->ht[table].table[idx];
+        while(he) {
+            if (key==he->key || dictCompareKeys(d, key, he->key)) {
+                if (existing) *existing = he;
+                return -1;
+            }
+            he = he->next;
+        }
+        if (!dictIsRehashing(d)) break;
+    }
+```
+
+而`dictAddRaw`同样是一个底层的操作，给定一个`key`，向`dict`中插入一个对应这个`key`的`dictEntry`,
+如果插入成功，会返回这个插入的`dictEntry`的指针，否则会返回一个`NULL`，在这种情况下，
+如果我们传入了`existing`，那么这个`key`对应的已经存在的`dictEntry`会赋值给`existing`。
+需要注意的是：
+1. 这个接口不会设置`dictEntry`的*val*，需要调用者在获取到`dictEntry`指针后，自己处理。
+2. 如果`dict`处于重哈希状态，那么这个新*key-value*会被插入第二个哈希表中，否则加入到第一个哈希表中，如代码所示：
+```c
+    ht = dictIsRehashing(d) ? &d->ht[1] : &d->ht[0];
+    entry = zmalloc(sizeof(*entry));
+    entry->next = ht->table[index];
+    ht->table[index] = entry;
+    ht->used++;
 ```
