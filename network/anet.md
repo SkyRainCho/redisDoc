@@ -32,6 +32,7 @@ int anetKeepAlive(char *err, int fd, int interval);
 |`TCP_KEEPIDLE`|7200秒|空闲计时器的时间，当一条连接的空闲时间达到了该选项设置的时间，会启动探测机制|
 |`TCP_KEEPINTVL`|75秒|探测超时的时间，发送一个探测报文后，多少时间内没有收到*ACK*，则认为超时|
 |`TCP_KEEPCNT`|10次|重发探测数量，当所有的探测报文均超时的时候，会重发多少次|
+
 函数`anetKeepAlive`可以开启TCP的保活检测机制，将空闲计时器的时间设置为`interval`，将探测超时时间设置为`interval/3`，
 将重发次数设置为3次。
 
