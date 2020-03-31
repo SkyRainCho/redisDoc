@@ -46,3 +46,67 @@ int anetEnableTcpNoDelay(char *err, int fd);
 int anetDisableTcpNoDelay(char *err, int fd);
 ```
 使用`setsockopt`函数，通过设定`TCP_NODELAY`选项的值来开启或者关闭*Nagle*算法。
+
+### TCP发送选项设置
+```c
+int anetSetSendBuffer(char *err, int fd, int buffsize);
+int anetSendTimeout(char *err, int fd, long long ms);
+```
+这两个接口函数分别用于设定*Redis*的*TCP*发送缓冲区大小，以及发送超时时间。
+
+### TCP用于地址解析的接口
+```c
+int anetGenericResolve(char *err, char *host, char *ipbuf, size_t ipbuf_len, int flags);
+int anetResolve(char *err, char *host, char *ipbuf, size_t ipbuf_len);
+int anetResolveIP(char *err, char *host, char *ipbuf, size_t ipbuf_len);
+```
+
+### TCP创建套接字接口
+```c
+static int anetSetReuseAddr(char *err, int fd);
+static int anetCreateSocket(char *err, int domain);
+```
+
+### TCP处理套接字Connect接口
+```c
+static int anetTcpGenericConnect(char *err, char *addr, int port, char *source_addr, int flags);
+int anetTcpConnect(char *err, char *addr, int port);
+int anetTcpNonBlockConnect(char *err, char *addr, int port);
+int anetTcpNonBlockBindConnect(char *err, char *addr, int port, char *source_addr);
+int anetTcpNonBlockBestEffortBindConnect(char *err, char *addr, int port, char *source_addr);
+int anetUnixGenericConnect(char *err, char *path, int flags);
+int anetUnixConnect(char *err, char *path);
+int anetUnixNonBlockConnect(char *err, char *path);
+```
+
+### TCP处理套接字上的读写操作
+```c
+int anetRead(int fd, char *buf, int count);
+int anetWrite(int fd, char *buf, int count);
+```
+
+### TCP以服务器方式启动套接字
+```c
+static int anetListen(char *err, int s, struct sockaddr *sa, socklen_t len, int backlog);
+static int anetV6Only(char *err, int s);
+static int _anetTcpServer(char *err, int port, char *bindaddr, int af, int backlog);
+int anetTcpServer(char *err, int port, char *bindaddr, int backlog);
+int anetTcp6Server(char *err, int port, char *bindaddr, int backlog);
+int anetUnixServer(char *err, char *path, mode_t perm, int backlog);
+```
+
+### TCP处理套接字接收连接的操作接口
+```c
+static int anetGenericAccept(char *err, int s, struct sockaddr *sa, socklen_t *len);
+int anetTcpAccept(char *err, int s, char *ip, size_t ip_len, int *port);
+int anetUnixAccept(char *err, int s);
+```
+
+### 用于将连接信息转化为字符串
+```c
+int anetPeerToString(int fd, char *ip, size_t ip_len, int *port);
+int anetFormatAddr(char *buf, size_t buf_len, char *ip, int port);
+int anetFormatPeer(int fd, char *buf, size_t buf_len);
+int anetSockName(int fd, char *ip, size_t ip_len, int *port);
+int anetFormatSock(int fd, char *fmt, size_t fmt_len);
+```
