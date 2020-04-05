@@ -93,7 +93,9 @@ int anetUnixNonBlockConnect(char *err, char *path);
 静态函数`anetTcpGenericConnect`是整套*Connect*接口的基础。
 接口函数`anetTcpConnect`是以正常阻塞的方式执行*TCP*的连接操作。
 接口函数`anetTcpNonBlockConnect`是以非阻塞的方式来执行*TCP*的连接操作。
+
 *客户端为什么要在执行`connect`之前，执行一次`bind`调用？？？*
+
 静态函数`anetUnixGenericConnect`则是*UNIX*域套接字*Connect*接口的基础。
 
 
