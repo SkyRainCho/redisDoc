@@ -90,11 +90,21 @@ int anetUnixNonBlockConnect(char *err, char *path);
 > *UNIX*域套接字用于在同一台计算机上运行的进程之间的通信，比起因特网域套接字，*UNIX*域套接字的效率更高。
 *UNIX*域套接字仅仅复制数据，它们并不执行协议处理，不需要添加或删除网络报头，无需计算校验和，不要产生顺序号，无需发送确认报文。
 
+静态函数`anetTcpGenericConnect`是整套*Connect*接口的基础。
+接口函数`anetTcpConnect`是以正常阻塞的方式执行*TCP*的连接操作。
+接口函数`anetTcpNonBlockConnect`是以非阻塞的方式来执行*TCP*的连接操作。
+*客户端为什么要在执行`connect`之前，执行一次`bind`调用？？？*
+静态函数`anetUnixGenericConnect`则是*UNIX*域套接字*Connect*接口的基础。
+
+
 ### TCP处理套接字上的读写操作
 ```c
 int anetRead(int fd, char *buf, int count);
 int anetWrite(int fd, char *buf, int count);
 ```
+函数`anetRead`会从连接对应的文件描述符上调用`read`系统调用，读取最多`count`个字节的数据到`buf`缓冲区上。
+
+函数`anetWrite`会向连接对应的文件描述符上，通过调用`write`系统调用，从`buf`缓冲区上写入最多`count`个字节。
 
 ### TCP以服务器方式启动套接字
 ```c
@@ -105,6 +115,13 @@ int anetTcpServer(char *err, int port, char *bindaddr, int backlog);
 int anetTcp6Server(char *err, int port, char *bindaddr, int backlog);
 int anetUnixServer(char *err, char *path, mode_t perm, int backlog);
 ```
+*关于TCP的积压值backlog*
+> 正在等待连接请求的一端有一个固定长度的连接队列，该队列中的链接已被*TCP*接收（即三次握手已经完成），
+但还没有被应用层所接受。注意区分TCP接受一个连接是将其放入这个队列，而应用层接收连接是将其从该队列中移出。
+应用层将指明改队列的最大长度，这个值通常成为积压值（*blocklog*）。
+
+静态函数`anetListen`是一个基础操作函数，该函数首先调用`bind`系统调用，将文件描述符`s`和地址`sa`进行绑定，然后调用`listen`系统调用，为该条连接设置积压值，并启动监听。
+静态函数`_anetTcpServer`也是一个基础操作函数，构建一个套接字连接，同时调用`anetListen`函数，启动监听。
 
 ### TCP处理套接字接收连接的操作接口
 ```c
