@@ -208,7 +208,7 @@ typedef struct aeApiState {
 4. 由于在aeApiPoll接口中已经将从内核返回的就绪事件拷贝到了事件循环中的fired就绪事件列表中了，
 后续会循环处理所有的就绪事件，通常情况下，我们会先处理可读事件，然后执行可写事件的处理逻辑，
 这在类似于执行查询操作后立即反馈查询结果这样的场景中
-很有用。但是如果在flags掩码中设置了AE_BARRIER标记，那么*Redis*会要求我们将执行顺序翻转过来，也就是在可读事件之后，
+很有用。但是如果在`flags`掩码中设置了`AE_BARRIER`标记，那么*Redis*会要求我们将执行顺序翻转过来，也就是在可读事件之后，
 绝不触发可写事件的处理。例如当我们需要在响应客户端请求之前，通过调用`beforeSleep`执行类似同步文件到磁盘的操作时，会很用：
 ```c
     for (j = 0; j < numevents; j++) {
@@ -243,4 +243,58 @@ typedef struct aeApiState {
         processed += processTimeEvents(eventLoop);
 ```
 
-processTimeEvents函数，则会处理事件循环之中的由定时器触发的时间事件。
+`processTimeEvents`函数，则会处理事件循环之中的由定时器触发的时间事件。其基础逻辑为：
+1. 尝试修正触发时间事件
+```c
+    if (now < eventLoop->lastTime) {
+        te = eventLoop->timeEventHead;
+        while(te) {
+            te->when_sec = 0;
+            te = te->next;
+        }
+    }
+```
+2. 从双向链表中删除已近被调度过的，同时被设置为`AE_DELETED_EVENT_ID`的时间事件，
+如果这个时间时间被设置了`finalizerProc`回调，那么在释放这个时间事件之前，会调用
+`finalizerProc`来处理相关释放逻辑：
+```c
+    while(te) {
+        ...
+        /* Remove events scheduled for deletion. */
+        if (te->id == AE_DELETED_EVENT_ID) {
+            
+            ...
+
+            if (te->finalizerProc)
+                te->finalizerProc(eventLoop, te->clientData);
+            zfree(te);
+            te = next;
+            continue;
+        }
+
+        ...
+    }
+```
+
+3. 处理已经到期的时间事件，会调用时间事件`timeProc`的处理函数，来处理到期触发的计时器时间事件，
+如果这个时间事件是一个一次性触发的时间事件，那么会返回`AE_NOMORE`标记，这时将该事件设置为`AE_DELETED_EVENT_ID`，
+在下次事件循环中删除这个事件；如果这个时间事件是一个周期触发的时间事件，那么`timeProc`会返回下次触发的毫秒数，
+通过`aeAddMillisecondsToNow`，将新的时间更新到这个时间事件上：
+```c
+    while(te) {
+        ...
+        if (now_sec > te->when_sec || (now_sec == te->when_sec && now_ms >= te->when_ms))
+        {
+            int retval;
+            id = te->id;
+            retval = te->timeProc(eventLoop, id, te->clientData);
+            processed++;
+            if (retval != AE_NOMORE) {
+                aeAddMillisecondsToNow(retval,&te->when_sec,&te->when_ms);
+            } else {
+                te->id = AE_DELETED_EVENT_ID;
+            }
+        }
+        te = te->next;
+    }
+```
