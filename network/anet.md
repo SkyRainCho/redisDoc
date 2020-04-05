@@ -66,6 +66,15 @@ int anetResolveIP(char *err, char *host, char *ipbuf, size_t ipbuf_len);
 static int anetSetReuseAddr(char *err, int fd);
 static int anetCreateSocket(char *err, int domain);
 ```
+在*TCP*中，如果断开连接，那个会进入一个*TIME_WAIT*状态，这个状态会持续2个*MSL*的时间，
+在这段时间内，定义这个连接所对应的套接字将处于不可用的状态，这种设计的原则思想在于：
+> 当*TCP*执行一个主动关闭，并发回最后一个*ACK*，该连接必须在*TIME_WAIT*状态停留的时间
+为2倍的*MSL*，这样可以让*TCP*再次发送最后的*ACK*以防这个*ACK*丢失。
+
+对于服务器来说，通常我们不需要其在*TIME_WAIT*状态中不可用，
+这时我们可以使用`anetSetReuseAddr`通过`setsockopt`函数设置`SO_REUSEADDR`属性，来是连接在*TIME_WAIT*状态中可用。
+
+而通过调用`anetCreateSocket`，我们可以创建一个连接地址可以重用的套接字，并返回套接字的文件描述符。
 
 ### TCP处理套接字Connect接口
 ```c
@@ -78,6 +87,8 @@ int anetUnixGenericConnect(char *err, char *path, int flags);
 int anetUnixConnect(char *err, char *path);
 int anetUnixNonBlockConnect(char *err, char *path);
 ```
+> *UNIX*域套接字用于在同一台计算机上运行的进程之间的通信，比起因特网域套接字，*UNIX*域套接字的效率更高。
+*UNIX*域套接字仅仅复制数据，它们并不执行协议处理，不需要添加或删除网络报头，无需计算校验和，不要产生顺序号，无需发送确认报文。
 
 ### TCP处理套接字上的读写操作
 ```c
