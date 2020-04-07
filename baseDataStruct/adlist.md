@@ -10,7 +10,7 @@ typedef struct listNode {
     void *value;
 } listNode;
 ```
-
+其中`listNode.value`字段用于保存指向真实数据内存的指针。
 
 ```c
 typedef struct list {
