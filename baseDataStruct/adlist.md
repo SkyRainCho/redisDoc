@@ -1,5 +1,9 @@
-# Redis中双端链表实现
-
+# Redis中的双端链表实现
+*Redis*是一个开源的使用*ANSI C*语言编写、支持网络、可基于内存亦可持久化的日志型、
+*Key-Value*数据库，并提供多种语言的*API*。*Redis*的源代码比较小巧精干，
+早期版本只有两万多行代码，即使是本系列所用的*5.0.8*版本的源代码，其代码量也不超过十万行，
+非常适合于学习。本系列将从基础的与其他部分关联度不大的基础数据结构开始，逐步探寻*Redis*系统
+设计的精妙之处，而笔者作为初学者，亦将此作为自己代码学习历程上的一个记录，并以此监督自己坚持学习下去。
 ## 双端链表基础数据结构
 在*src/adlist.h*头文件中，定义*Redis*双端链表的基础数据结构，
 包括链表节点，链表本体以及链表迭代器的数据结构
@@ -22,6 +26,17 @@ typedef struct list {
     unsigned long len;
 } list;
 ```
+上述是双端链表本体的数据结构，其中`list.len`字段维护了链表的长度，
+这样可以让我们不需要遍历整个链表就可以获得链表的长度，
+此处需要吐槽一下*g++ 4.8.5*中的计算链表长度的方法，竟然是采用遍历的方法计算:
+```cpp
+size_type
+size() const _GLIBCXX_NOEXCEPT
+{
+    return std::distance(begin(), end());
+}
+```
+而数据结构中的三个函数指针，则可以根据需要，进行赋值，以定制化的根据不同数据类型实现不同的功能。
 
 ```c
 typedef struct listIter {
@@ -29,6 +44,7 @@ typedef struct listIter {
     int direction;
 } listIter;
 ```
+这个则是链表迭代器的结构体定义，`listIter.direction`则是标记了这个迭代器迭代的方向。
 
 
 ## 宏定义的基础操作
@@ -111,7 +127,7 @@ listNode *listSearchKey(list *list, void *key);
 listNode *listIndex(list *list, long index);
 ```
 这个函数用于对链表进行索引操作，这个索引值既可以是*zero-based*的正向索引，
-也可以使从`-1`开始的一个反向索引，执行结束后，返回索引对应的节点的指针:
+也可以使用从`-1`开始的一个反向索引，执行结束后，返回索引对应的节点的指针:
 ```c
 listNode *listIndex(list *list, long index) {
     listNode *n;
@@ -151,7 +167,7 @@ listNode *listNext(listIter *iter);
 void listRewind(list *list, listIter *li);
 void listRewindTail(list *list, listIter *li);
 ```
-这两个函数分别用于初始化一个正向迭代器以及以及反向迭代器。其具体的用于可以如下所示：
+这两个函数分别用于初始化一个正向迭代器以及以及反向迭代器。其具体的用法可以如下所示：
 ```c
     listIter iter;
     listNode *node;
