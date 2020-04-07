@@ -107,21 +107,75 @@ listNode *listSearchKey(list *list, void *key);
     }
 ```
 
+```c
+listNode *listIndex(list *list, long index);
+```
+这个函数用于对链表进行索引操作，这个索引值既可以是*zero-based*的正向索引，
+也可以使从`-1`开始的一个反向索引，执行结束后，返回索引对应的节点的指针:
+```c
+listNode *listIndex(list *list, long index) {
+    listNode *n;
+
+    if (index < 0) {
+        index = (-index)-1;
+        n = list->tail;
+        while(index-- && n) n = n->prev;
+    } else {
+        n = list->head;
+        while(index-- && n) n = n->next;
+    }
+    return n;
+}
+```
+
 ### 链表迭代器
 ```c
 listIter *listGetIterator(list *list, int direction);
 void listReleaseIterator(listIter *iter);
+listNode *listNext(listIter *iter);
 ```
+其中`listGetIterator`可以根据传入的方向参数，生成一个正向或者反向迭代器，
+方向参数的定义在*src/adlist.h*头文件中：
+```c
+#define AL_START_HEAD 0        //用于生成正向迭代器
+#define AL_START_TAIL 1        //用于生成反向迭代器
+```
+而`listReleaseIterator`则用于释放一个迭代器；`listNext`用于对迭代器执行迭代操作，
+返回迭代器当前所指向的节点指针，同时根据方向，将迭代器移动到下一个操作。
 
 上述生成链表迭代器的操作所产生的迭代器是一个在堆空间上动态分配的迭代器，
-这个迭代器可以通过指针，在整个程序的生命周期有效，知道调用`listReleaseIterator`将其释放。
+这个迭代器可以通过指针，在整个程序的生命周期有效，直到调用`listReleaseIterator`将其释放。
 而当我们仅仅需要在一个函数内，将链表迭代器作为局部变量使用的话，我们可以使用下面两个函数，
 来对栈上的局部迭代器进行初始化，同时系统会在函数调用结束后，自动释放该局部迭代器：
 ```c
 void listRewind(list *list, listIter *li);
 void listRewindTail(list *list, listIter *li);
 ```
-这两个函数分别用于初始化一个正向迭代器以及以及反向迭代器。
-
+这两个函数分别用于初始化一个正向迭代器以及以及反向迭代器。其具体的用于可以如下所示：
+```c
+    listIter iter;
+    listNode *node;
+    listRewind(l, &iter);
+    while((node = listNext(&iter)) != NULL) {
+        //TODO:
+    }
+```
 
 ### 链表特殊操作
+```c
+list *listDup(list *orig);
+```
+该函数用于拷贝整个链表，如果通过`listSetDupMethod`为链表设置了*Dup*方法，
+那么将执行一次深度拷贝工作，也就是使用`list.dup`函数来对节点进行构造；
+否则的话，将执行一次浅拷贝，即将原始节点的`value`指针，赋值给新节点，也就是两个节点均引用同一个*value*。
+
+```c
+void listRotate(list *list);
+```
+这个函数用于对链表执行翻转操作，也就是将链表的尾节点转移到链表的头部，循环调用该链表，
+可以实现翻转链表的操作。
+
+```c
+void listJoin(list *l, list *o);
+```
+这个函数用于对两个链表执行连接操作，也就是将`o`链表中元素按照顺序连接到`l`链表的后面。
