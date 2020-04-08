@@ -252,3 +252,7 @@ void dictFreeUnlinkedEntry(dict *d, dictEntry *he);
 函数`dictAddOrFind`可以让我们给定一个`key`来查找这个指定`key`对应的`dictEntry`指针，如果`key`不存在`dict`中，
 那么会想其中插入一个`dictEntry`，并返回。
 而函数`dictFind`，会根绝给定的`key`来查找对应的`dictEntry`，如果查找不到，会返回`NULL`。
+
+### Redis中用于处理哈希表迭代器的操作接口
+
+### Redis中用于随机访问哈希表元素的操作接口
