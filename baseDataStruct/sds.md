@@ -242,3 +242,8 @@ int sdscmp(const sds s1, const sds s2);
 * 如果`s1 < s2`，返回一个负数。
 * 如果两个`sds`的二进制数据完全相同，那么这个函数返回0。
 
+
+***
+![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
+
+喜欢的同学可以扫描二维码，关注我的微信公众号，*马基雅维利incoding*

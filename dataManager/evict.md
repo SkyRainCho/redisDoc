@@ -1,1 +1,6 @@
 # Redis中的LRU淘汰机制与其他策略
+
+***
+![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
+
+喜欢的同学可以扫描二维码，关注我的微信公众号，*马基雅维利incoding*

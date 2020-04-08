@@ -74,3 +74,8 @@ enum memory_order
     atomicSet(myvar,12345);
 ```
 这里需要注意，配合计数器一起声明的互斥锁的变量名，必须使用计数器变量名加上`_mutex`后缀的形式。
+
+***
+![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
+
+喜欢的同学可以扫描二维码，关注我的微信公众号，*马基雅维利incoding*

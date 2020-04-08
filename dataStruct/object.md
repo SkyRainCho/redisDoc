@@ -42,3 +42,9 @@ typedef struct redisObject {
 
 `redisObject`在*Redis*内部被广泛使用，但是为了避免间接访问所带来的的额外开销，
 最近在很多地方，*Redis*使用没有被包装在`redisObject`中的单纯的动态*String*来表示数据。
+
+
+***
+![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
+
+喜欢的同学可以扫描二维码，关注我的微信公众号，*马基雅维利incoding*

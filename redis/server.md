@@ -18,3 +18,9 @@
 3. 当执行一个写入命令时，而此时*Redis*内存不足的时候，会调用`freeMemoryIfNeeded()`。
 4. 全局变量`redisCommandTable`定义了所有的*Redis*命令，指定了命令的名字，
 该命令的实现函数，所需的参数的数量以及这个命令的其他一些属性。
+
+
+***
+![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
+
+喜欢的同学可以扫描二维码，关注我的微信公众号，*马基雅维利incoding*

@@ -256,3 +256,9 @@ void dictFreeUnlinkedEntry(dict *d, dictEntry *he);
 ### Redis中用于处理哈希表迭代器的操作接口
 
 ### Redis中用于随机访问哈希表元素的操作接口
+
+
+***
+![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
+
+喜欢的同学可以扫描二维码，关注我的微信公众号，*马基雅维利incoding*

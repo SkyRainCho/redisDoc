@@ -195,3 +195,8 @@ void listRotate(list *list);
 void listJoin(list *l, list *o);
 ```
 这个函数用于对两个链表执行连接操作，也就是将`o`链表中元素按照顺序连接到`l`链表的后面。
+
+***
+![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
+
+喜欢的同学可以扫描二维码，关注我的微信公众号，*马基雅维利incoding*
