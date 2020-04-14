@@ -90,7 +90,7 @@ static inline size_t sdslen(const sds s);
 ```c
 static inline size_t sdsalloc(const sds s);
 ```
-给定一个sds数据，获取其分配缓存的总长度。
+给定一个sds数据，获取其分配缓存`sdshdr.buf`的总长度。
 
 ```c
 static inline size_t sdsavail(const sds s);
@@ -121,8 +121,8 @@ static inline void sdssetalloc(const sds s, size_t newlen);
 static inline int sdsHdrSzie(char type);
 static inline char sdsReqType(size_t string_size);
 ```
-上述两个在sds.c头文件中定义的两个静态函数，分别用于计算一个特定HeaderType的header的长度，
-以及根据一个string_size的长度，返回合适的HeaderType。
+上述两个在*src/sds.c*头文件中定义的两个静态函数，分别用于返回一个特定*HeaderType*的头部结构体长度，
+以及根据一个`string_size`的长度，返回合适的*HeaderType*。
 
 ```c
 sds sdsnewlen(const void *init, size_t initlen);
@@ -132,64 +132,80 @@ sds sdsdup(const sds s);
 void sdsfree(sds s);
 ```
 
-其中`sdsnewlen`函数，是这一系列函数的基础，其作用是，给定一段初始化内存的头指针init，
-以及初始长度initlen，构建一个sds数据。这个函数会根据你需要初始化数据的长度initlen通过`sdsReqType`来选择
-所使用的HeaderType，8位，16位，32位还是64位，使用`s_malloc`调用，为其分配长度为`headerSize + initlen + 1`
-的缓存，同时初始话Header中的type,len,alloc字段，并将init所指向的数据调用`memcpy`拷贝到sds的缓冲区中，
+其中`sdsnewlen`函数，是这一系列函数的基础，其作用是，给定一段初始化内存的头指针`init`，以及初始长度`initlen`，构建一个`sds`数据。
+这个函数会根据你需要初始化数据的长度`initlen`通过`sdsReqType`接口来选择所使用的*HeaderType*，8位，16位，32位还是64位，
+使用`s_malloc`调用，为其分配长度为`headerSize + initlen + 1`的缓存，之所以需要多分配出一个字节的缓存，
+是因为在*Redis*中的`sds`总是以`\0`作为结束标记的，因为需要为这个结束标记多分配出一个字节的缓存。
+同时由于`sds`本质上是二进制安全的，这也就意味着在数据的中间也有可能会出现`\0`，故此这也是我们为什么在头部信息结构体中需要`sdshdr.len`字段的原因。
+同时初始话Header中的type,len,alloc字段，并将init所指向的数据调用`memcpy`拷贝到sds的缓冲区中，
 同时以`\0`作为结束标记(null-termined)。
 
-后续的三个接口都是通过调用sdsnewlen来完成相关功能的。
-* `sdsempty`函数用来创建一个空的sds数据
-* `sdsnew`函数可以从一个null-terminated的C风格字符串中创建一个sds数据
+后续的三个接口都是通过调用sdsnewlen来完成相关功能的：
+* `sdsempty`函数用来创建一个空的sds数据。
+* `sdsnew`函数可以从一个null-terminated的C风格字符串中创建一个sds数据。注意这个接口不是二进制安全的，因为其内部是使用`strlen`来计算传入数据长度的。
 * `sdsdup`函数可以通过一个给定的sds数据，复制出一个新的sds数据并返回
 
-最后一个借口`sdsfree`函数通过调用s_free接口来释放一个给定的sds数据，
-需要注意的是，所释放的内容包括sds头指针，以及其前面的Header数据。
+最后一个接口`sdsfree`函数通过调用`s_free`接口来释放一个给定的`sds`数据，
+需要注意的是，所释放的内容包括`sds`头指针，以及其前面的*Header*数据的整个缓存。
 
 ***
 ## 用于调整Strings长度信息的操作函数
 ```c
 void sdsupdatelen(sds s);
 ```
-通过对内部数据调用strlen来更新sds的长度，这个接口在sds缓存被手动改写的情况下很有用
+通过对内部数据调用`strlen`来更新`sds`的长度，这个接口在`sds`缓存被手动改写的情况下很有用。
+通常来说，这个接口用于缩短`sds`的`sdshdr.len`字段，但是这个接口不会对`sdshdr.buf`中的数据进行修改。
 
 ```c
 void sdsclear(sds s);
 ```
-用于清空一个sds数据的内容，但是不会释放已经存在的缓存。可以理解为内容和长度清零，但是空间还在。
+用于清空一个`sds`数据的内容，与`sdsupdatelen`接口类似，这个函数不会释放或者修改已经存在的缓存。仅仅是将`sdshdr.len`长度字段清零，但是空间还在。
 
 ```c
 sds sdsMakeRoomFor(sds s, size_t addlen);
 ```
-这个接口用于增大一个给定sds数据的可用空间，可以让确保玩家在调用改接口之后，可以向缓存之中续写
-addlen个字节的内容，但是这个操作不会改变已经使用的缓存的大小，也就是不会改变sdslen调用的结果。
+`sdsMakeRoomFor`这个接口用于扩大一个给定`sds`数据的可用缓存空间，可以确保用户在调用这个接口之后，可以向缓存之中续写
+`addlen`个字节的内容，但是这个操作不会改变已经使用的缓存的大小，也就是不会改变`sdslen`调用的结果。
 其中几个细节点：
-1. 如果当前sds的可用空间也就是sdsavail的大小大于addlen，那么该函数什么操作也不会执行。
-2. 如果当前操作没有引起Header的升级，例如从8位Header升级到16位，那么会调用s_realloc接口为其增加缓存容量。
-3. 如果引发了Header的升级，那么会调用s_malloc接口来分配一个新的sds，将原始数据拷贝进去，返回新的sds数据。
+1. 如果当前`sds`的可用空间也就是`sdsavail`的大小大于`addlen`，那么该函数什么操作也不会执行。
+2. 同时为了减少重复分配缓存所带来的系统开销，`sdsMakeRoomFor`接口总是会多分配出一些预留（最多1MB字节）的缓存：
+```c
+    newlen = (len+addlen)
+    if (newlen < SDS_MAX_PREALLOC)
+        newlen *= 2;
+    else
+        newlen += SDS_MAX_PREALLOC;
+```
+3. 如果当前操作没有引起*Header*的升级，例如从8位*Header*升级到16位，那么会调用`s_realloc`接口为其增加缓存容量。
+4. 扩容操作永远不会使用`SDS_TYPE_5`类型的*Header*，因为该类型的*Header*无法保存可用缓存的大小，这也就意味着，如果使用`SDS_TYPE_5`类型的`sds`，
+那么每次进行*append*操作的时候，都会调用`sdsMakeRoomFor`来重新分配缓存。那么对于一个`SDS_TYPE_5`类型的`sds`，在调用过一次`sdsMakeRoomFor`之后，
+至少会被升级的`SDS_TYPE_8`类型的`sds`。
+4. 如果引发了*Header*的升级，那么会调用`s_malloc`接口来分配一个新的`sds`，将原始数据拷贝进去，返回新的`sds`指针。
 
 ```c
 sds sdsRemoveFreeSpace(sds s);
 ```
-这个接口的用途是收缩sds的缓存大小，使之刚好保存sdslen大小的数据，而没有多余的可用空间
+`sdsRemoveFreeSpace`这个接口的用途是收缩sds的缓存大小，通过释放多余的可用空间，使之刚好保存`sdslen`大小的数据。
 其中的细节点：
-1. 如果收缩导致Header的降级，那么调用s_malloc接口重新分配一个新的sds，拷贝数据后，返回新的sds
-2. 如果收缩没有导致Header的降级，那么直接调用s_realloc接口调整缓存大小，实现容量收缩
+1. 如果收缩导致*Header*的降级，那么调用`s_malloc`接口重新分配一个新的`sds`，拷贝数据后，返回新的`sds`。
+2. 如果收缩没有导致*Header*的降级，那么直接调用`s_realloc`接口调整缓存大小，实现缓存释放。
 
 ```c
 size_t sdsAllocSize(sds s);
 ```
-这个接口用与返回分配给指定sds数据的内存的总大小，
+`sdsAllocSize`这个接口用与返回分配给指定`sds`数据的内存的总大小。
 其中包含:
-1. s指针前的Header的大小
-2. string数据的大小
+1. `sds`指针前的`Header`的大小
+2. 缓存中已使用数据的大小
 3. 可用空间的大小
-4. 强制结束符`\0`的大小
+4. 结束符`\0`的大小
+
+这个接口与`sdsalloc`的区别是，`sdsalloc`返回的是`sdshdr.buf`分配的缓存的大小。
 
 ```c
 void* sdsAllocPtr(sds s);
 ```
-这个接口返回一个sds数据直接被分配的头指针，也就是Header首个字节的指针。
+`sdsAllocPtr`这个接口返回一个`sds`数据直接被分配的头指针，也就是*Header*的指针。
 
 ```c
 void sdsIncrLen(sds s, ssize_t incr);
