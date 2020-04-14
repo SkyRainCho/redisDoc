@@ -1,9 +1,12 @@
 # Redis中的C语言动态Strings库
 
-这个库主要是用来描述*Redis*之中的五个基本类型之一的*String*，
+在*src/sds.h*中定义了*Redis*中的动态*String*类型，这意味着，
+使用者仅仅需要调用接口*API*就可以向*String*加入数据，而不需要关心扩容的问题。
 *Redis*使用 `typedef char *sds;` 来描述这个动态*String*，
 其在内存中的分布格式为一个*StringHeader*以及在*StringHeader*后面
 一段连续的动态内存，而`sds`则是指向*StringHeader*后面的连续内存的第一个字节。
+其在内存中问分布情况可以入下图所示：
+![sds内存分布](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/sds%E5%86%85%E5%AD%98%E5%88%86%E5%B8%83.PNG)
 
 ## Strings的头部信息
 
