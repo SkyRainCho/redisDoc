@@ -6,6 +6,7 @@
 其在内存中的分布格式为一个*StringHeader*以及在*StringHeader*后面
 一段连续的动态内存，而`sds`则是指向*StringHeader*后面的连续内存的第一个字节。
 其在内存中问分布情况可以入下图所示：
+
 ![sds内存分布](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/sds%E5%86%85%E5%AD%98%E5%88%86%E5%B8%83.PNG)
 
 ***
