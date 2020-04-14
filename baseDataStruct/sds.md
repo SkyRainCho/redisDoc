@@ -8,17 +8,21 @@
 其在内存中问分布情况可以入下图所示：
 ![sds内存分布](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/sds%E5%86%85%E5%AD%98%E5%88%86%E5%B8%83.PNG)
 
+***
 ## Strings的头部信息
 
 `sds`的头部信息主要包含了`sds`被分配的缓存大小以及已经使用的缓存的大小，
-在*Redis*中定义了五种`sds`的头部信息：
+根据所需要的分配缓存的大小，在*Redis*中定义了五种`sds`的头部信息：
 * `sdshdr5`，定义了类型`SDS_TYPE_5`
 * `sdshdr8`，定义了类型`SDS_TYPE_8`
 * `sdshdr16`，定义了类型`SDS_TYPE_16`
 * `sdshdr32`，定义了类型`SDS_TYPE_32`
 * `sdshdr64`，定义了类型`SDS_TYPE_64`
 
-其中`sdshdr5`从来不被使用，其余的头部信息都是按照如下格式（以`sdshdr32`为例）进行定义的：
+上述的五种`sdshdr`分别表示最大可以分配缓存的大小，
+其中`sdshdr5`表示最大可以分配`1 << 5`大小的缓存，而`sdshdr8`表示最大可以分配`1 << 8`大小的缓存。
+
+除了`sdshdr5`之外，其余的头部信息都是按照如下格式（以`sdshdr32`为例）进行定义的：
 ```c
 struct __attribute__ ((__packed__)) sdshdr32
 {
@@ -28,14 +32,46 @@ struct __attribute__ ((__packed__)) sdshdr32
     char            buf[];  //动态分配的缓存
 };
 ```
+而`sdshdr5`头部的格式则是按照如下的方式进行定义的：
+```c
+struct __attribute__ ((__packed__)) sdshdr5
+{
+    unsigned char    flags;    //低三位保存header类型信息，高五位用于表示已经使用缓存的长度
+    char             buf[];    //动态分配的缓存 
+};
+```
+基于我们需要的*String*的长度，选择不同的`sdshdr`，这样可以达到节约空间的目的。
+通过*Redis*之中关于`sdshdr`数据类型的定义，我们可以发现，无论是哪种`sdshdr`,
+`sdshdr.buf`缓存字段之前，都是`sdshdr.flags`标记字段，在*Redis*之中，
+我们实际使用的`sds`变量，其实是指向`sdshdr.buf`的指针，而整个*SDS*是一段连续分配的内存，
+那么，如果我们通过`sds`向前偏移一个字节长度的话`sds[-1]`，一定是这个*SDS*数据的`sdshdr.flags`字段。
+通过位运算，我们便可以知道该*SDS*数据所使用`sdshdr`的类型，进而通过指针偏移，
+便可以获取到整个*SDS*的头部信息，后续很对对于*SDS*的基础操作都是通过该方式实现的。
+
+***
 
 ## Strings的通用底层操作
 
 在头文件之中定义了若干个宏以及静态函数用于实现对于`sds`的基础操作。
+
 ```c
 #define SDS_HDR(T,s) ((struct sdshdr##T *)((s)-(sizeof(struct sdshdr##T))))
 ```
 给定一个`sds`数据，使用`SDS_HDR`来获取其对应的`sdshdr`的头指针。
+其使用方法是通过*SDS*数据获取到对应的`sdshdr.flags`，进而得到*HeaderType*，通过调用`SDS_HDR`来获取
+整个头部信息，例如：
+```c
+unsigned char flags = s[-1];
+switch (flags * SDS_TYPE_MASK)
+{
+    ...
+
+    case SDS_TYPE_8:
+        SDS_HDR(8, s)->len = new_len;
+        break;
+    ...
+}
+```
 
 ```c
 #define SDS_HDR_VAR(T,s) struct sdshdr##T *sh = (void*)((s)-(sizeof(struct sdshdr##T)));
@@ -69,12 +105,16 @@ static inline void sdssetlen(sds s, size_t newlen);
 static inline void sdsinclen(sds s, size_t inc);
 ```
 给定一个sds数据，以及一个需要增加的长度inc，将sds的header中的len字段增加inc。
+需要注意的是，在`sdsinclen`中，并不会检查增加的长度`inc`是否是合法的，
+仅仅是将`inc`累加到`sdshdr.len`之中。这就需要调用者在调用`sdsinclen`接口之前，
+自己检查长度是否合法。
 
 ```c
 static inline void sdssetalloc(const sds s, size_t newlen);
 ```
 给定一个sds数据，以及一个新的长度newlen，将sds的header中的alloc字段设置为newlen。
 
+***
 ## 构造与释放Strings的操作函数
 ```c
 static inline int sdsHdrSzie(char type);
@@ -105,7 +145,7 @@ void sdsfree(sds s);
 最后一个借口`sdsfree`函数通过调用s_free接口来释放一个给定的sds数据，
 需要注意的是，所释放的内容包括sds头指针，以及其前面的Header数据。
 
-
+***
 ## 用于调整Strings长度信息的操作函数
 ```c
 void sdsupdatelen(sds s);
@@ -165,6 +205,7 @@ sds sdsgrowzero(sds s, size_t len);
 ```
 内部通过调用`sdsMakeRoomFor`将sds的缓存区增加len的长度，同时将新增的缓冲区初始化为0。
 
+***
 ## 用于处理Strings内容的操作函数
 
 ```c
