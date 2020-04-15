@@ -180,7 +180,9 @@ sds sdsMakeRoomFor(sds s, size_t addlen);
 4. 扩容操作永远不会使用`SDS_TYPE_5`类型的*Header*，因为该类型的*Header*无法保存可用缓存的大小，这也就意味着，如果使用`SDS_TYPE_5`类型的`sds`，
 那么每次进行*append*操作的时候，都会调用`sdsMakeRoomFor`来重新分配缓存。那么对于一个`SDS_TYPE_5`类型的`sds`，在调用过一次`sdsMakeRoomFor`之后，
 至少会被升级的`SDS_TYPE_8`类型的`sds`。
-4. 如果引发了*Header*的升级，那么会调用`s_malloc`接口来分配一个新的`sds`，将原始数据拷贝进去，返回新的`sds`指针。
+5. 如果引发了*Header*的升级，那么会调用`s_malloc`接口来分配一个新的`sds`，将原始数据拷贝进去，返回新的`sds`指针,
+这也就意味着，调用者无法保证作为参数传入的`sds`指针在调用结束后是否依然有效，
+因此比如使用函数的返回值来执行后续操作`s = sdsMakeRoomFor(s, newlen);`。
 
 ```c
 sds sdsRemoveFreeSpace(sds s);
@@ -206,35 +208,45 @@ size_t sdsAllocSize(sds s);
 void* sdsAllocPtr(sds s);
 ```
 `sdsAllocPtr`这个接口返回一个`sds`数据直接被分配的头指针，也就是*Header*的指针。
-
 ```c
 void sdsIncrLen(sds s, ssize_t incr);
 ```
-可以理解为可以给指定的sds的len增加incr的长度，同时会导致sdsavail的可用空间减少
+可以理解为可以给指定的`sds`的`sdshdr.len`增加`incr`的长度，同时会导致`sdsavail`的可用空间减少，
+该接口只负责处理`sds`数据的长度，而不会改动其内容。
 基本应用场景:
 1. 调用`sdsMakeRoomFor`函数为sds扩容
 2. 向sds的缓存之中写入数据
 3. 调用`sdsIncrLen`函数，调整写入数据之后的sdslen长度
-同时需要注意incr的大小，不能超过sdsavail的大小，否则会触发断言机制
-
 ```c
-sds sdsgrowzero(sds s, size_t len);
+    oldlen = sdslen(s);
+    s = sdsMakeRoomFor(s, BUFFER_SIZE);
+    nread = read(fd, s+oldlen, BUFFER_SIZE);
+    /* ... check for nread <= 0 and handle it ... */
+    sdsIncrLen(s, nread);
 ```
-内部通过调用`sdsMakeRoomFor`将sds的缓存区增加len的长度，同时将新增的缓冲区初始化为0。
+这个接口与`sdsinclen`类似，但是该接口更多的是提供给用户调用，其内部增加了长度校验机制，
+这就需要我们在调用前通过`sdsMakeRoomFor`接口来确保可用缓存空间，
+或者手动检查`incr`的大小，不能超过`sdsavail`的大小，否则会触发断言机制。
 
 ***
 ## 用于处理Strings内容的操作函数
+```c
+sds sdsgrowzero(sds s, size_t len);
+```
+`sdsgrowzero`内部通过调用`sdsMakeRoomFor`将`sds`的缓存区增加`sdshdr.len`的长度，
+同时将新增的缓冲区初始化为0。
 
 ```c
 sds sdscatlen(sds s, const void *t, size_t len);
-```
-向sds数据中扩展一段二进制安全的数据，t为这段数据的指针，len为需要扩展的长度，
-其内部会通过调用`sdsMakeRoomFor`尝试将sds的缓冲区进行扩展。
-
-```c
 sds sdscat(sds s, const char *t);
+sds sdscatsds(sds s, const sds t);
 ```
-通过内部调用`sdscatlen`函数来实现向sds中扩展一个C风格字符串。
+上面这三个接口函数都是用来执行`sds`数据的连接操作。
+`sdscatlen`会向`sds`数据中扩展一段二进制安全的数据，这个上述三个函数的基础，
+其余两个函数都是通过调用`sdscatlen`来实现的。
+其内部会通过调用`sdsMakeRoomFor`尝试将`sds`的缓冲区进行扩展。
+而函数`sdscat`会向`sds`中连接一个C风格字符串数据，`sdscatsds`函数则会执行两个`sds`数据的连接操作。
+值得注意的是，上面三个函数均未对*target*数据执行释放操作，调用者需要根据自己的需求对*target*数据执行响应的操作。
 
 ```c
 sds sdscpylen(sds s, const char *t, size_t len);
