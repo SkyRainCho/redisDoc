@@ -115,6 +115,16 @@ static inline void sdssetalloc(const sds s, size_t newlen);
 ```
 给定一个sds数据，以及一个新的长度newlen，将sds的header中的alloc字段设置为newlen。
 
+通过源码，我们可以发现，`SDS_TYPE_5`类型的`sds`数据与其他类型的`sds`数据不论在`sdshdr`结构，
+还是基础操作接口的处理，均有很大的差异。*Redis*在2015年7月15日的提交中引入了这个新的`sds`类型，
+作者自己给出的提交信息是：
+> A new type, SDS_TYPE_5 is introduced having a one byte header with just the string length, without information about the available additional length at the end of the string.
+
+结合后续其他操作接口对于`SDS_TYPE_5`类型的处理，我们可以认为，
+这个类型的`sds`数据，主要用于存储长度不超过32个字节，并且不会重新分配缓存的数据。
+对此，*Redis*的作者也给出了建议：
+> Don't use TYPE 5 if strings are going to be reallocated, since it sucks not having a free space left field.
+
 ***
 ## 构造与释放Strings的操作函数
 ```c
@@ -183,6 +193,11 @@ sds sdsMakeRoomFor(sds s, size_t addlen);
 5. 如果引发了*Header*的升级，那么会调用`s_malloc`接口来分配一个新的`sds`，将原始数据拷贝进去，返回新的`sds`指针,
 这也就意味着，调用者无法保证作为参数传入的`sds`指针在调用结束后是否依然有效，
 因此比如使用函数的返回值来执行后续操作`s = sdsMakeRoomFor(s, newlen);`。
+
+对于接口`sdsMakeRoomFor`，*Redis*的作者给出的建议是：
+> Don't call sdsMakeRoomFor() when obviously not needed.
+
+也就是说，当我们能确保`sds`中有足够的多余缓存时，那么就不要调用该接口。
 
 ```c
 sds sdsRemoveFreeSpace(sds s);
@@ -266,7 +281,17 @@ int sdsull2str(char *s, unsigned long long value);
 sds sdsfromlonglong(long long value);
 ```
 从一个long long整形数构建一个sds数据，类似调用`int sprintf(char *str, const char *format, ...)`
-将一个整形数字写入一个字符串。
+将一个整形数字写入一个字符串。我们已知，在*Redis*之中，没有专门的数值类型，整形数字也是需要使用*String*类型来保存的，
+而这个函数主要用于，将一个整形数字转化为*Redis*自定义的数据类型：
+```c
+robj *createStringObjectFromLongLongWithOptions(long long value, int valueobj) {
+    robj *o;
+    ...
+    o = createObject(OBJ_STRING,sdsfromlonglong(value));  
+    ...
+}
+```
+上述代码便是用过调用`sdsfromlonglong`接口将一个整数转化为*Redis*的字符串对象的。
 
 ```c
 sds sdscatvprintf(sds s, const char *fmt, va_list ap);
@@ -277,7 +302,7 @@ sds sdscatfmt(sds s, char const* fmt, ...);
 需要注意的是，作为参数传入的s，在函数执行成功后已不能保证有效性，
 应使用`s = sdscatprintf(s. "1");`这样的方式进行操作。
 另外`sdscatfmt`函数是是一个与`sdscatprintf`类似的接口，但是其执行的速度要更快
-原因在与其没依赖与libc库所提供的`sprintf()`族函数，而这一组操作通常是很慢的。
+原因在与其没依赖与*libc*库所提供的`sprintf()`族函数，而这一组操作通常是很慢的。
 但是其只支持特定的几种通配符：
 | 通配符 | 含义 |
 |:------|:-----|
@@ -287,18 +312,34 @@ sds sdscatfmt(sds s, char const* fmt, ...);
 |`%I`|64位有符号整数|
 |`%u`|unsigned int 无符号整数|
 |`%U`|64位无符号整数|
-|`%%`||
+|`%%`|用于打印%符号|
 
 ```c
 sds sdstrim(sds s, const char *cset);
 ```
-给定一个C风格的字符集合`cset`，以及一个特定的`sds`数据，去除这个`sds`中前后属于这个`cset`的字符，
-并返回更新后的`sds`数据。需要注意的是，这个移除操作，在遇到第一个不属于`cset`的字符时结束
+接口`sdstrim`给定一个C风格的字符集合`cset`，以及一个特定的`sds`数据，移除这个`sds`中前后属于这个`cset`的字符，
+并返回更新后的`sds`数据。需要注意的是：
+```c
+    sp = start = s;
+    ep = end = s+sdslen(s)-1;
+    while(sp <= end && strchr(cset, *sp)) sp++;
+    while(ep > sp && strchr(cset, *ep)) ep--;
+```
+通过代码我们可以了解到该接口的移除操作在遇到第一个不属于`cset`的字符时结束。
+其中一些代码示例：
+```c
+void loadServerConfigFromString(char *config) {
+    ...
+    lines[i] = sdstrim(lines[i]," \t\r\n");
+    ...
+}
+```
+在*Redis*中该接口的主要用途是用于移除空格、换行符、制表符等空字符。
 
 ```c
 void sdsrange(sds s, sszie_t start, ssize_t end);
 ```
-给定一个特定的`sds`数据，以及一个*range*的`[start, end]`，将这个`sds`数据缩小成符合这个*range*的子串。
+`sdsrange`给定一个特定的`sds`数据，以及一个*range*的`[start, end]`，将这个`sds`数据缩小成符合这个*range*的子串。
 *range*的范围可以是负值，其含义可以参考*Python*中对于列表的切片操作。
 
 ```c
@@ -310,10 +351,15 @@ void sdstoupper(ssd s);
 ```c
 int sdscmp(const sds s1, const sds s2);
 ```
-内部通过调用`memcmp`来比较两个`sds`数据的大小：
+`sdscmp`接口内部通过调用`memcmp`来比较两个`sds`数据的大小：
 * 如果`s1 > s2`，返回一个正数。
 * 如果`s1 < s2`，返回一个负数。
 * 如果两个`sds`的二进制数据完全相同，那么这个函数返回0。
+
+```c
+sds *sdssplitlen(const char *s, ssize_t len, const char *sep, int seplen, int *count);
+void sdsfreesplitres(sds *tokens, int count)
+```
 
 
 ***
