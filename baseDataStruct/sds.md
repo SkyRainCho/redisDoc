@@ -264,6 +264,18 @@ sds sdscatsds(sds s, const sds t);
 值得注意的是，上面三个函数均未对*target*数据执行释放操作，调用者需要根据自己的需求对*target*数据执行响应的操作。
 
 ```c
+sds sdsjoin(char **argv, int argc, char *sep);
+sds sdsjoinsds(sds *argv, int argc, const char *sep, size_t seplen);
+```
+上述两个函数与`sdscat`系列接口类似，是执行一组C风格字符串或者`sds`数据的连接操作，
+同时会以`sep`作为分隔符。
+
+```c
+sds sdscatrepr(sds s, const char *p, size_t len);
+```
+
+
+```c
 sds sdscpylen(sds s, const char *t, size_t len);
 sds sdscpy(sds s, const chart *t);
 ```
@@ -349,6 +361,17 @@ void sdstoupper(ssd s);
 上述两个操作是给定一个`sds`数据，对于其内部的每一个字符调用`tolower`或者`toupper`操作。
 
 ```c
+sds sdsmapchars(sds s, const char *from, const char *to, size_t setlen);
+```
+`sdsmapchars`接口用于对一个`sds`数据执行字符替换，`from`为匹配串，`to`为替换串，
+```c
+    sds s = sdsnew("hello");
+    s = sdsmapchars(s, "ho", "01", 2);
+    printf("%c\n", s);
+    //output 0ell1
+```
+
+```c
 int sdscmp(const sds s1, const sds s2);
 ```
 `sdscmp`接口内部通过调用`memcmp`来比较两个`sds`数据的大小：
@@ -358,7 +381,8 @@ int sdscmp(const sds s1, const sds s2);
 
 ```c
 sds *sdssplitlen(const char *s, ssize_t len, const char *sep, int seplen, int *count);
-void sdsfreesplitres(sds *tokens, int count)
+void sdsfreesplitres(sds *tokens, int count);
+sds *sdssplitargs(const char *line, int *argc);
 ```
 
 
