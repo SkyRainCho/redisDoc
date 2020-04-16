@@ -271,11 +271,6 @@ sds sdsjoinsds(sds *argv, int argc, const char *sep, size_t seplen);
 同时会以`sep`作为分隔符。
 
 ```c
-sds sdscatrepr(sds s, const char *p, size_t len);
-```
-
-
-```c
 sds sdscpylen(sds s, const char *t, size_t len);
 sds sdscpy(sds s, const chart *t);
 ```
@@ -325,6 +320,23 @@ sds sdscatfmt(sds s, char const* fmt, ...);
 |`%u`|unsigned int 无符号整数|
 |`%U`|64位无符号整数|
 |`%%`|用于打印%符号|
+
+```c
+sds sdscatrepr(sds s, const char *p, size_t len);
+```
+`sdscatrepr`这个接口主要用于将给定字符串中的不可打印的字符进行转移，并将结构连接到`sds`数据之后。
+该函数常用的场景是向客户端返回一个转移后的字符串，创建一个空的`sds`数据，将转移后的数据添加至该`sds`中，
+例如：
+```c
+static sds cliFormatReplyCSV(redisReply *r)
+{
+    sds out = sdsempty();
+    ...
+        out = sdscat(out, "ERROR,");
+        out = sdscatrepr(out, r->str. strlen(r->srr));
+    ...
+}
+```
 
 ```c
 sds sdstrim(sds s, const char *cset);
@@ -384,7 +396,40 @@ sds *sdssplitlen(const char *s, ssize_t len, const char *sep, int seplen, int *c
 void sdsfreesplitres(sds *tokens, int count);
 sds *sdssplitargs(const char *line, int *argc);
 ```
-
+上面这三个接口主要用于处理`sds`的*split*操作，
+其中接口`sdssplitlen`会根据输入的字符串已经分隔符生成一个`sds`数据的动态数组，
+同时使用`count`数据来返回这个数组的长度。而接口`sdsfreesplitres`接口则用于释放上述动态生成的数据。
+这两个接口常用的应用场景为从配置文件中加载数据：
+```c
+void loadServerConfigFromString(char *config)
+{
+    int totlines;
+    sds *lines;
+    lines = sdssplitlen(config, strlen(config), "\n", 1, & totlines);
+    ...
+}
+```
+而`sdssplitargs`接口则是将一行字符串拆分成多个`sds`数据，其主要用于将一行字符串解析成参数列表的形式，
+供*Redis*后续使用。当我们使用完这个`sds`参数列表之后，我们需要手动调用`sdsfreesplitres`对其进行释放。
+一个应用场景的实例是*Redis*客户端加载*~/.redisclirc*配置文件时：
+```c
+void cliLoadPreference(void)
+{
+    ...
+    while(fget(buf, sizeof(buf), fp) != NULL)
+    {
+        sds* argv;
+        int argc;
+        argv = sdssplitargs(buf, &argc);
+        if (argc > 0)
+        {
+            //Handle argv
+        }
+        sdsfreesplitres(argv, argc);
+    }
+    ...
+}
+```
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
