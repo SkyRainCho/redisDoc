@@ -39,12 +39,12 @@ typedef struct dictht {
 ![dictht内存分布](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/dictht%E5%86%85%E5%AD%98%E5%88%86%E5%B8%83.PNG)
 
 在`dictht`中这个`sizemask`数据主要视为实现快速取余的用途，这个掩码被设定为`size-1`的大小。
-这里体现了*Redis*哈希表与*g++*中`unordered_map`的一个不同之处，*g++*总是会选取一个素数作为桶的数量，
+这里体现了*Redis*哈希表与 *g++* 中`unordered_map`的一个不同之处，*g++* 总是会选取一个素数作为桶的数量，
 而在*Redis*之中，桶的数量一定是2的*n*次方个，那么当`dictht.size`为16的时候，`dictht.sizemask`对应而二进制形式变为`1111`,
-这样对于一个给定的哈希值`h`使用`h & sizemask`可以获得哈希值对`szie`的取余操作结果。
-根据余数，可以决定这个`ky-value`数据落在哪个哈希表的哪个桶中。
+这样对于一个给定的哈希值`h`使用`h & sizemask`可以获得哈希值对`size`的取余操作结果。
+根据余数，可以决定这个`key-value`数据落在哪个哈希表的哪个桶中。
 
-同时，*src/dict.h*头文件中，定义了一个结构体，存储基础哈希操作的函数指针，
+同时，*src/dict.h*头文件中，定义了一个结构体，存储基础哈希操作的函数指针，这里体现了*Redis*代码实现中的函数式编程的思想，
 用户可以对指定的函数指针赋值自己定义的函数接口。
 ```c
 typedef struct dictType {
@@ -56,8 +56,24 @@ typedef struct dictType {
     void (*valDestructor)(void *privdata, void *obj);     //用于处理val的释放
 } dictType;
 ```
+*Redis*为不同的哈希表给出了不同的`dictType`，例如在*src/server.c*文件中，
+```c
+/* Db->dict, key是sds动态字符串, vals则是Redis对象类型 */
+dictType dbDictType = {
+    dictSdsHash,                /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    dictSdsKeyCompare,          /* key compare */
+    dictSdsDestructor,          /* key destructor */
+    dictObjectDestructor        /* val destructor */
+};
+```
+*Redis*会使用上述这组`dictType`来描述*Redis*数据库中的键空间，`server.db[j].dict = dictCreate(&dbDictType,NULL);`。
 
-使用`dictht`以及`dictType`两个数据结构，*Redis*定义自己的*key-value*的数据结构`dict`:
+基于`dictht`以及`dictType`这两个数据结构，*Redis*定义最终的哈希表数据结构`dict`:
+
+![dict内存分布](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/dict%E5%86%85%E5%AD%98%E5%88%86%E5%B8%83.PNG)
+
 ```c
 typedef struct dict {
     dictType *type;
