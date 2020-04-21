@@ -1,18 +1,13 @@
 # Redis中哈希表的实现
+在*Redis*中，哈希表不但是我们可以使用的几种基础数据结构之一，同时还是整个*Redis*数据存储结构的核心。
+究其根本，*Redis*是一种基于*Key-Value*的内存数据库，所有的用户数据，*Redis*在底层都是使用哈希表进行保存的。
+可以说，了解*Redis*中哈希表的实现方式，是了解*Redis*存储的一个关键。
 
-在文件*src/dict.h*文件之中定义了*Redis*关于哈希表的实现。
-在*Redis*中，实现了一个内存哈希表，这个哈希支持如下的操作：
-* 插入
-* 删除
-* 替换
-* 查找
-* 随机获取元素
+## Redis哈希表概述
+基于链表的哈希表是实现哈希表的一个主流方式，除了*Redis*中的哈希表实现，*g++*中的`unordered_map`也是使用基于链表的哈希表实现的，
+但是两者之间还是有一些细微的差别，这在后续会进行介绍。
 
-哈希边可以在需要时进行扩容，将容量按照当前容量的二倍大小进行扩容。
-同时使用拉链的方法来解决哈希碰撞的问题。
-
-## Redis哈希表的基础数据结构
-在*src/dict.h*头文件之中，首先定义了基于拉链的哈希表的链表基本节点数据结构。
+在*src/dict.h*头文件之中，首先定义了哈希表中的链表基本节点数据结构。
 ```c
 typedef struct dictEntry
 {
@@ -24,11 +19,11 @@ typedef struct dictEntry
         int64_t s64;  //可以用来存储一个64位有符号整形数据
         double d;     //可以用来存储一个双精度浮点数据
     } v;                      //使用union来保存value数据
-    struct dictEntry *next;   //由于使用基于拉链的哈希表实现，next用于保存桶中下一个key-value对。
+    struct dictEntry *next;   //由于使用基于拉链的哈希表实现，next用于指向桶中下一个key-value对。
 } dictEntry;
 ```
-在这个*key-value*的数据结构之中，既可以使用一个64位整数作为*value*，也可以使用一个双精度浮点数作为*value*，
-同时还可以使用一个任何一段内存作为*value*，而*value*之中也保存这段内存的指针。
+在这个*key-value*的数据结构之中，*value*是使用一个联合体`union`来表示的，通过这个联合体，*Redis*既可以使用一个64位整数作为*value*，
+也可以使用一个双精度浮点数作为*value*，同时还可以使用一个任何一段内存作为*value*，而*value*之中也保存这段内存的指针。
 
 基于这个哈希表的基本节点数据结构，*Redis*定义了自己的哈希表数据结构：
 ```c
@@ -39,9 +34,15 @@ typedef struct dictht {
     unsigned long used;       //该哈希表之中，已经保存的*key-value*的数量
 } dictht;
 ```
-在`dictht`中这个`sizemask`数据主要视为实现快速取余的用途，这个掩码被设定为`size-1`的大小，
-对于一个给定的哈希值`h`使用`h & sizemask`可以获得哈希值对`szie`的取余操作。根据余数，
-可以决定这个`ky-value`数据落在哪个哈希表的哪个桶中。
+根据`dictht`给出的定义，我们可以知道这个哈希表在内存中的结构可以如下图所示：
+
+![dictht内存分布](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/dictht%E5%86%85%E5%AD%98%E5%88%86%E5%B8%83.PNG)
+
+在`dictht`中这个`sizemask`数据主要视为实现快速取余的用途，这个掩码被设定为`size-1`的大小。
+这里体现了*Redis*哈希表与*g++*中`unordered_map`的一个不同之处，*g++*总是会选取一个素数作为桶的数量，
+而在*Redis*之中，桶的数量一定是2的*n*次方个，那么当`dictht.size`为16的时候，`dictht.sizemask`对应而二进制形式变为`1111`,
+这样对于一个给定的哈希值`h`使用`h & sizemask`可以获得哈希值对`szie`的取余操作结果。
+根据余数，可以决定这个`ky-value`数据落在哪个哈希表的哪个桶中。
 
 同时，*src/dict.h*头文件中，定义了一个结构体，存储基础哈希操作的函数指针，
 用户可以对指定的函数指针赋值自己定义的函数接口。
@@ -76,7 +77,7 @@ typedef struct dict {
 
 
 
-## Redis哈希表的基础底层操作
+### Redis哈希表的基础底层操作
 
 在*src/dict.h*头文件之中，*Redis*定义了一组用于完成基本底层操作的宏：
 | 宏定义 | 具体含义 |
@@ -94,7 +95,7 @@ typedef struct dict {
 |`#define dictSize(d)`|获取`dict`中存储元素的个数，由两个哈希表中`used`数据的加和组成|
 |`#define dictIsRehashing(d)`|判断`dict`是否处于重哈希过程中|
 
-## Redis哈希表的构造与初始化接口
+## Redis哈希表的构造与增删改查
 
 ### Redis用于初始化创建与释放清理哈希表的接口
 ```c
@@ -252,6 +253,8 @@ void dictFreeUnlinkedEntry(dict *d, dictEntry *he);
 函数`dictAddOrFind`可以让我们给定一个`key`来查找这个指定`key`对应的`dictEntry`指针，如果`key`不存在`dict`中，
 那么会想其中插入一个`dictEntry`，并返回。
 而函数`dictFind`，会根绝给定的`key`来查找对应的`dictEntry`，如果查找不到，会返回`NULL`。
+
+## Redis哈希表的迭代与遍历
 
 ### Redis中用于处理哈希表迭代器的操作接口
 
