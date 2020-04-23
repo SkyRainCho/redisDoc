@@ -71,9 +71,6 @@ dictType dbDictType = {
 *Redis*会使用上述这组`dictType`来描述*Redis*数据库中的键空间，`server.db[j].dict = dictCreate(&dbDictType,NULL);`。
 
 基于`dictht`以及`dictType`这两个数据结构，*Redis*定义最终的哈希表数据结构`dict`:
-
-![dict内存分布](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/dict%E5%86%85%E5%AD%98%E5%88%86%E5%B8%83.PNG)
-
 ```c
 typedef struct dict {
     dictType *type;
@@ -83,15 +80,55 @@ typedef struct dict {
     unsigned long iterators; /* number of iterators currently running */
 } dict;
 ```
-*Redis*在`dict`中使用两个*hashtable*的主要用意是方便在进行*ReHash*操作时，进行数据转移。
-*Redis*在执行重哈希操作时，不会一次性将所有的数据进行重哈希，因为如果在哈希表中有大量的*key-value*数据的话，
-对所有数据进行重哈希操作，会导致系统阻塞在重哈希操作中，无法退出，而*Redis*本身又是单进程单线程的模式，
+
+![dict内存分布](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/dict%E5%86%85%E5%AD%98%E5%88%86%E5%B8%83.PNG)
+
+上面这张图，便是描述了*Redis*的哈希表在内存中的分布结构，我们可以注意到其中的一个特别设计之处，
+也就是在`dict`结构中会有两个底层的哈希表数据结构`dict.ht[2]`，
+这与*g++*中的`unordered_map`的设计有着显著的不同，
+```cpp
+class _Hashtable
+{
+    ...
+    __bucket_type*    _M_buckets;
+    size_type         _M_bucket_count;
+    size_type         _M_element_count;
+    ...
+};
+template<class _Key, class _Tp,
+        class _Hash = hash<_Key>,
+        class _Pred = std::equal_to<_Key>,
+        class _Alloc = std::allocator<std::pair<const _Key, _Tp> > >
+class unordered_map
+{
+    ...
+    _Hashtable _M_h;
+    ...
+};
+```
+从*g++*的`unordered_map`源代码可以知道，它在内部只维护了一个底层哈希表数据结构。
+
+*为什么Redis的哈希表要有两个呢？？？*
+
+之所以*Redis*在`dict`中使用两个*hashtable*，其主要用意是方便在进行*ReHash*操作时，进行数据转移。
+*Redis*在执行重哈希操作时，不会一次性将所有的数据进行重哈希，而是采用一种增量的方式，
+逐步地将数据转移到新的桶中。而这又是其与`unordered_map`的不同之处，`unordered_map`在进行重哈希的时候，
+会一次性地将表中的所有元素移动到新的桶中，而不是增量进行的。究其原因，`unordered_map`只是*C++*中存储数据的
+手段之一，其有特定的应用场景，因此不需要增量地进行重哈希。而在*Redis*中，虽然官方给出了多种基础数据类型，
+但是其在底层进行检索的时候，都是以哈希表进行存储的，同时*Redis*定义为是一种数据库，那么其在哈希表中所存储的数据
+的量级要远远大于通用的*C++*程序，如果在哈希表中有大量的*key-value*数据的话，对所有数据进行重哈希操作，
+会导致系统阻塞在重哈希操作中无法退出，而*Redis*本身对于核心数据的操作又是单线程的模式，
 这将导致*Redis*无法对外提供服务。为解决这个问题，*Redis*在`dict`中给出了保存了两个哈希表，在进行重哈希操作时，
-*Redis*会将第二个哈希表进行扩容，然后定期将第一个哈希表中的数据重哈希到第二个哈希表中。而此时，
-而这时，保存在第一个哈希表中没有来得及进行重哈希的数据，对于客户端用户来说，依然是可用的，而当第一个全部数据重哈希结束后，
-*Redis*会把数据从第二个哈希表中转移至第一个哈希表中，结束重哈希操作。
+*Redis*会将第二个哈希表进行扩容或者缩容，然后定期将第一个哈希表中的数据重哈希到第二个哈希表中。
+而这时，保存在第一个哈希表中没有来得及进行重哈希的数据，对于客户端用户来说，依然是可用的。
+当第一个哈希表中全部数据重哈希结束后，*Redis*会把数据从第二个哈希表中转移至第一个哈希表中，结束重哈希操作。
 
 ![重哈希dict内存分布](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/%E9%87%8D%E5%93%88%E5%B8%8C%E7%9A%84dict%E5%86%85%E5%AD%98%E5%88%86%E5%B8%83.PNG)
+
+上图便是*Redis*在对哈希表执行重哈希操作过程中，其在内存中的分布情况。在进行重哈希的过程中`dict.rehashidx`字段
+标记了第一个哈希表中下一次需要被重哈希的桶的索引，当重哈希结束后，这个字段会被设置为`-1`。
+
+而字段`dict.iterators`则是关联在这个哈希表上的安全迭代器的数量，关于安全迭代器的内容，会在后续进行介绍。
 
 
 
