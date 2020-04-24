@@ -206,6 +206,17 @@ int _dictClear(dict *d, dictht *ht, void(callback)(void *))
 以阻塞的方式进行的，当删除一个很大的哈希表时，缺少一种增量逐步执行某些操作的机制。
 因此，作者在这次提交中引入了这个机制，可以在删除哈希表时，以一个固定的间隔来执行回调函数。
 
+一个简单的例子，在使用主从结构的*Redis*集群时，*slave*节点在异步读取从*master*节点
+收到的*SYNC*数据时，会涉及到删除自己的旧数据以加载新数据，*slave*节点阻塞在从哈希表中删除旧数据，
+而无法响应其他请求时，*master*节点可能会认为该节点超时，为了防止这种情况发生，我们可以在清空哈希表时，
+传入如下的回调函数，定期向*master*节点发送一个*newLine*数据，确保*master*不会误认为改节点超时：
+```c
+void replicationEmptyDbCallback(void *privdata)
+{
+    replicationSendNewlineToMaster();
+}
+```
+
 ### Redis用于扩展哈希表容量的接口
 ```c
 void dictEnableResize(void);
