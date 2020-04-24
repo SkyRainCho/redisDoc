@@ -150,25 +150,71 @@ class unordered_map
 |`#define dictSize(d)`|获取`dict`中存储元素的个数，由两个哈希表中`used`数据的加和组成|
 |`#define dictIsRehashing(d)`|判断`dict`是否处于重哈希过程中|
 
-## Redis哈希表的构造与增删改查
+## Redis哈希表的构造释放与增删改查
 
 ### Redis用于初始化创建与释放清理哈希表的接口
 ```c
 static void _dictReset(dictht *ht);
 int _dictInit(dict *d, dictType *type, void *privDataPtr);
-int _dictClear(dict *d, dictht *ht, void(callback)(void *));
+dict *dictCreate(dictType *type, void *privDataPtr);
 ```
-其中`_dictReset`函数对一个给定的`dictht`进行重置初始化。
-`_dictInit`函数，使用一个`dictType`以及一个私有数据指针`privDataPtr`来初始化一个`dict`数据。
+其中：
+1. `_dictReset`函数对一个给定的`dictht`进行重置初始化。
+2. `_dictInit`函数，使用一个`dictType`以及一个私有数据指针`privDataPtr`来初始化一个`dict`数据；
+并调用`_dictReset`函数来初始化`dict`的两个底层哈希表。
+3. `dictCreate`函数，会调用`zmalloc`函数来分配一个`dict`，并调用`_dictInit`对数据进行初始化。
 
 ```c
-dict *dictCreate(dictType *type, void *privDataPtr);
 void dictRelease(dict *d);
+int _dictClear(dict *d, dictht *ht, void(callback)(void *));
+void dictEmpty(dict* d, void(callbacl)(void*));
 ```
-通过这个接口，给定一个`dictType`以及一个私有内存数据的指针，内部通过调用`_dictInit`，
-最终创建一个`dict`数据。
+上述三个函数用于清空与释放一个给定的哈希表，其中`_dictClear`函数是整个释放操作的基础，
+该函数用于释放哈希表中的某一个给定的底层哈希表，逐个释放每个桶中的每个元素；
+`dictRelease`函数与`dictEmpty`都会调用`_dictClear`来清空释放哈希表中的元素，
+二者的区别是，`dictRelease`在释放哈希表中元素后会释放整个哈希表，
+而`dictEmpty`则不会释放哈希表`dict`这个数据结构。
+在`_dictClear`函数释放数据的时候，这里有一个特殊的操作：
+```c
+int _dictClear(dict *d, dictht *ht, void(callback)(void *))
+{
+    ...
+    for (i = 0; i < ht->size && ht->used > 0; i++)
+    {
+        ...
+        if (callback && (i & 65535) == 0) callback(d->privdata);
+        ...
+        //free key-value pair in the bucket
+    }
+    ...
+}
+```
+我们可以看到，如果在清空哈希表的时候，传入了`callback`回调函数作为参数的话，
+那么*Redis*会在清空哈希表时，每清空`65536`个桶时，会调用`callback`函数，处理响应的逻辑。
+这段代码是*Redis*作者在2013年11月11日添加的，作者自己给出的提交信息是：
+> dict.c: added optional callback to dictEmpty().
+> 
+> Redis hash table implementation has many non-blocking fearures like
+> incremental rehashing, however while deleting a large hash table there
+> was no way to have a callback called to do some incremental work.
+> 
+> This commit adds this support, as an optiona callback argument to
+> dictEmtpy() that  is currently called at a fixed interval (one time every
+> 65k deletions)
+
+按照作者的说法，在*Redis*的哈希表操作很多的是以非阻塞的方式进行的，但是释放与清空的操作确是
+以阻塞的方式进行的，当删除一个很大的哈希表时，缺少一种增量逐步执行某些操作的机制。
+因此，作者在这次提交中引入了这个机制，可以在删除哈希表时，以一个固定的间隔来执行回调函数。
 
 ### Redis用于扩展哈希表容量的接口
+```c
+void dictEnableResize(void);
+void dictDisableResize(void);
+```
+上述的两个函数用于设置静态全局变量`dict_can_resize`，对于这个全局变量的描述：
+1. `dict_can_resize`为0，不会对哈希表进行缩容；当哈希表的装载因子大于强制重哈希阈值`dict_force_resize_ratio`时，
+仍然会进行重哈希扩容操作。
+2. `dict_can_resize`为1，会对哈希表进行缩容；如果哈希表的装载因子大于1，就会对哈希表执行重哈希扩容操作。
 ```c
 static unsigned long _dictNextPower(unsigned long size);
 static int _dictExpandIfNeeded(dict *ht);
