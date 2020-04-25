@@ -420,10 +420,10 @@ void dictFreeUnlinkedEntry(dict *d, dictEntry *he);
 
 函数`dictAdd`执行了最简单插入操作，如果成功，就调用`dictSetVal`设置*val*，否则的话，返回`DICT_ERR`
 
-而函数`dictReplace`执行的是一个插入或者覆盖的操作，如果是插入新元素，那么放回1，如果覆盖已有元素，则返回0。
+而函数`dictReplace`执行的是一个插入或者覆盖的操作，如果是插入新元素，那么返回1，如果覆盖已有元素，则返回0。
 
 函数`dictAddOrFind`可以让我们给定一个`key`来查找这个指定`key`对应的`dictEntry`指针，如果`key`不存在`dict`中，
-那么会想其中插入一个`dictEntry`，并返回。
+那么会向其中插入一个`dictEntry`，并返回。
 而函数`dictFind`，会根据给定的`key`来查找对应的`dictEntry`，如果查找不到，会返回`NULL`。
 
 #### Redis哈希表的删除
