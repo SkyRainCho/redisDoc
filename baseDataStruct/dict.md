@@ -217,7 +217,11 @@ void replicationEmptyDbCallback(void *privdata)
 }
 ```
 
-### Redis用于扩展哈希表容量的接口
+### Redis用于对哈希表进行重哈希的接口
+因为*Redis*是使用链表的形式来实现哈希表的，哈希值冲突的键值对会以链表的形式存储在一个桶中，
+如果桶中平均的链表长度过长的话，会严重降低搜索的效率；同时如果键值对过少，而哈希表中的桶数过多，
+则会浪费内存的空间。因此需要在哈希表的装载因子过大或者过小的时候，对哈希表进行重哈希，扩容或者缩容，
+以达到提高搜索速度，或者优化内存存储的目的。
 ```c
 void dictEnableResize(void);
 void dictDisableResize(void);
@@ -226,6 +230,8 @@ void dictDisableResize(void);
 1. `dict_can_resize`为0，不会对哈希表进行缩容；当哈希表的装载因子大于强制重哈希阈值`dict_force_resize_ratio`时，
 仍然会进行重哈希扩容操作。
 2. `dict_can_resize`为1，会对哈希表进行缩容；如果哈希表的装载因子大于1，就会对哈希表执行重哈希扩容操作。
+
+#### Reis用于调整哈希表大小的接口
 ```c
 static unsigned long _dictNextPower(unsigned long size);
 static int _dictExpandIfNeeded(dict *ht);
@@ -252,7 +258,7 @@ int dictResize(dict *d);
     }
 ```
 
-而函数`dictExpand`则会根据给定的`size`对这个`dict`进行扩容，*Redis*会根据`size`计算出真正的调整容量:
+而函数`dictExpand`则会根据给定的`size`对这个`dict`的容量进行调整，*Redis*会根据`size`计算出真正的调整容量:
 ```c
     unsigned long realsize = _dictNextPower(size);
 ```
@@ -270,8 +276,22 @@ int dictResize(dict *d);
     return DICT_OK;
 ```
 而函数`dictResize`会将这个`dict`调整至最小的可以容纳所有元素的大小。
+在*src/server.c*源文件中定义了接口用于判断一个哈希表是否需要进行缩容
+```c
+int htNeedsResize(dict *dict)
+{
+    long long size, used;
+    size = dictSlots(dict)
+    used = dictSize(dict)
 
-### Redis用于进行重哈希的操作接口
+    return (size > DICT_HT_INITIAL_SIZEE && (used*100/size < HASHTABLE_MIN_FILL));
+}
+```
+
+上述这几个接口不会真的执行移动数据的操作，只是会对哈希表的尺寸进行调整，同时将哈希表设置成进入重哈希的状态，
+真正的数据迁移是在后续重哈希接口中进行的。
+
+#### Redis用于进行重哈希的操作接口
 ```c
 int dictRehash(dict *d, int n);
 int dictRehashMilliseconds(dict *d, int ms);
@@ -305,11 +325,48 @@ static void _dictRehashStep(dict *d);
 而`dictRehashMilliseconds`会在1毫秒的时间片内，执行若干次`dictRehash`操作，直到所有数据都已经重哈希，
 或者执行时间超过1毫秒的时间片。
 
+在*Redis*的服务器中，系统会以1毫秒一次的心跳来执行`databaseCron`接口，用于增量处理*Redis*数据库操作：
+```c
+void databaseCron(void)
+{
+    ...
+    if (server.rdb_child_pid == -1 && server.aof_child_pid == -1)
+    {
+        ...
+        /* Resize */
+        for (j = 0; j < dbs_per_call; j++)
+        {
+            tryResizeHashTables(resize_db % server.dbnum);
+            resize_db ++;
+        }
+
+        /* Rehash */
+        if (server.activerehashing)
+        {
+            for (j = 0; j < dbs_per_call; j++)
+            {
+                int work_done = incrementallyRehash(rehash_db);
+                if (work_done)
+                {
+                    break;
+                }
+            }
+        }
+        ...
+    }
+    ...
+}
+```
+上述的代码便是*Redis*渐进式重哈希的核心，函数`tryResizeHashTables`会调用`dictResize`对哈希表进行缩容，
+函数`incrementallyRehash`会调用`dictRehashMilliseconds`对哈希表进行重哈希。
+
 `_dictRehashStep`函数是一个通常在内部调用的函数，如果在没有安全迭代器的情况下，这个函数会对其中1个元素执行重哈希:
 ```c
     if (d->iterators == 0) 
         dictRehash(d,1);
 ```
+设计这个函数的意义在于，在执行添加、删除、查找操作是被动执行一次单步重哈希，用来提高系统重哈希的速度。
+对于涉及安全迭代器的内容，在后续的内容之中会进行介绍。
 
 ### Redis用于向哈希表中添加删除搜索元素的操作接口
 ```c
