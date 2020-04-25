@@ -202,7 +202,7 @@ int _dictClear(dict *d, dictht *ht, void(callback)(void *))
 > dictEmtpy() that  is currently called at a fixed interval (one time every
 > 65k deletions)
 
-按照作者的说法，在*Redis*的哈希表操作很多的是以非阻塞的方式进行的，但是释放与清空的操作确是
+按照作者的说法，在*Redis*的哈希表操作很多的是以非阻塞的方式进行的，但是释放与清空的操作却是
 以阻塞的方式进行的，当删除一个很大的哈希表时，缺少一种增量逐步执行某些操作的机制。
 因此，作者在这次提交中引入了这个机制，可以在删除哈希表时，以一个固定的间隔来执行回调函数。
 
@@ -239,7 +239,7 @@ int dictExpand(dict *d, unsigned long size);
 int dictResize(dict *d);
 ```
 `__dictNextPower`用于通过给定的`size`来计算需要扩容的大小，从`DICT_HT_INITIAL_SIZE`开始，
-每次翻倍，知道找到第一个大于等于`size`的数值，即为扩容后的大小。
+每次翻倍，直到找到第一个大于等于`size`的数值，即为扩容后的大小。
 
 在我们对一个`dict`数据添加一个新的*key-value*时，都会尝试调用`_dictExpandIfNeeded`来尝试，
 是否需要对于`dict`进行扩容，其判断是否需要扩容，则依照下面的两种情况进行判断:
@@ -365,7 +365,7 @@ void databaseCron(void)
     if (d->iterators == 0) 
         dictRehash(d,1);
 ```
-设计这个函数的意义在于，在执行添加、删除、查找操作是被动执行一次单步重哈希，用来提高系统重哈希的速度。
+设计这个函数的意义在于，在执行添加、删除、查找操作时被动执行一次单步重哈希，用来提高系统重哈希的速度。
 对于涉及安全迭代器的内容，在后续的内容之中会进行介绍。
 
 ### Redis用于向哈希表中添加删除搜索元素的操作接口
@@ -381,6 +381,9 @@ int dictDelete(dict *ht, const void *key);
 dictEntry *dictUnlink(dict *ht, const void *key);
 void dictFreeUnlinkedEntry(dict *d, dictEntry *he);
 ```
+
+#### Redis哈希表的添加与查找
+
 其中`_dictKeyIndex`函数是一个基础的底层操作，给定一个`key`以及其对应的`hash`值，
 获取这个返回其所应该放置的桶的索引，如果这个`key`已经存在，那么返回-1，
 同时在`key`已经存在的情况下，如果传入了`existing`，那么这个对应的已存在`dictEntry`会被赋值给`existing`。
@@ -421,7 +424,39 @@ void dictFreeUnlinkedEntry(dict *d, dictEntry *he);
 
 函数`dictAddOrFind`可以让我们给定一个`key`来查找这个指定`key`对应的`dictEntry`指针，如果`key`不存在`dict`中，
 那么会想其中插入一个`dictEntry`，并返回。
-而函数`dictFind`，会根绝给定的`key`来查找对应的`dictEntry`，如果查找不到，会返回`NULL`。
+而函数`dictFind`，会根据给定的`key`来查找对应的`dictEntry`，如果查找不到，会返回`NULL`。
+
+#### Redis哈希表的删除
+其中函数`dictGenericDelete`是哈希表删除操作的基础，这个函数会接受一个参数`nofree`，如果该参数被设置为0，
+那么会将查找到的节点直接释放；如果该参数为1，那么会将查找到节点从哈希表中分离出来，返回给调用者自己操作。
+```c
+int dictDelete(dict *ht, const void *key)
+{
+    return dictGenericDelete(ht, key, 0) ? DICT_OK : DICT_ERR;
+}
+```
+`dictDelete`函数便是以`nofree = 0`来调用`dictGenericDelete`函数直接删除释放节点。
+
+```c
+dictEntry *dictUnlink(dict *ht, const void *key)
+{
+    return dictGenericDelete(ht, key, 1);
+}
+```
+这个函数会返回从哈希表中分离出的节点。那么设计这个函数的意义在于，如果我们希望从哈希表中找到某个节点，对该节点执行某些操作后，释放该节点的话，
+如果使用先查找在删除的方式来进行的话，需要执行两次查找
+```c
+entry = dictFind(...);
+//do something
+dictDelete(dictionary, entry);
+```
+如果应用`dictUnlink`接口，那么只需要执行一次查找就可以。
+```c
+entry = dictUnlink(...);
+//do something
+dictFreeUnlinkedEntry(entry);
+```
+最后使用`dictFreeUnlinkedEntry`接口，可以实现分离节点的释放。
 
 ## Redis哈希表的迭代与遍历
 
