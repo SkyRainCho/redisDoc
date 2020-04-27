@@ -482,6 +482,48 @@ unsigned int dictGetSomeKeys(dict *d, dictEntry **des, unsigned int count);
 该接口返回足够的采样数据。
 2. 该接口无法保证，所返回的采样结果一定是没有重复的。
 
+```c
+    while(stored < count && maxsteps--) {
+        for (j = 0; j < tables; j++) {
+            if (tables == 2 && j == 0 && i < (unsigned long) d->rehashidx) {
+                if (i >= d->ht[1].size)
+                    i = d->rehashidx;
+                else
+                    continue;
+            }
+            if (i >= d->ht[j].size) continue; /* Out of range for this table. */
+            dictEntry *he = d->ht[j].table[i];
+
+            if (he == NULL) {
+                emptylen++;
+                if (emptylen >= 5 && emptylen > count) {
+                    i = random() & maxsizemask;
+                    emptylen = 0;
+                }
+            } else {
+                emptylen = 0;
+                while (he) {
+                    *des = he;
+                    des++;
+                    he = he->next;
+                    stored++;
+                    if (stored == count) return stored;
+                }
+            }
+        }
+        i = (i+1) & maxsizemask;
+    }
+```
+
+其基本逻辑为：
+1. 从两个哈希表中选取最大的`maxsizemask`，以此为依据生成随机索引。
+2. 根据该随机索引，选择对应的桶，将该桶中的元素尽可能的加入到返回结果中，如果达到`count`的数量，那么直接结束调用。
+3. 如果没有达到所需的`count`，那么选择下一个桶进行采样，`i = (i+1) & maxsizemask;`。
+4. 如果对应的桶为空，则选择下一个桶进行采样；如果连续五个桶都为空，则重新生成随机索引，这一步有可能会导致数据被重复采样。
+5. 如果生成的随机索引大于当前哈希表的`size`，则用该索引查看另外一个哈希表，
+而第一步的`maxsizemask`则可以保证随机索引在两个哈希表中至少有一个是有效的。
+6. 如果对桶的采样超过`10 * count`的次数，则停止采样，防止*Redis*长时间的阻塞在这个调用中，
+这也是导致该接口无法保证返回`count`个采样结果的原因之一。
 
 ### Redis中用于处理哈希表迭代器的操作接口
 
