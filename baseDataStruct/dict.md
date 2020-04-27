@@ -526,6 +526,40 @@ unsigned int dictGetSomeKeys(dict *d, dictEntry **des, unsigned int count);
 这也是导致该接口无法保证返回`count`个采样结果的原因之一。
 
 ### Redis中用于处理哈希表迭代器的操作接口
+对于哈希表的迭代器，*Redis*给出了两种迭代器类型，
+1. 安全迭代器，运行迭代器在迭代的过程中进行数据插入，查找，以及其他操作。
+2. 非安全迭代器，在迭代过程中只能调用`dictNext()`操作，也就是带迭代过程中禁止对哈希表进行改变。
+
+```c
+dictIterator *dictGetIterator(dict *d);
+dictIterator *dictGetSafeIterator(dict *d);
+dictEntry *dictNext(dictIterator *iter);
+void dictReleaseIterator(dictIterator *iter);
+```
+上面的四个函数便是*Redis*哈希表迭代器的接口，`dictGetIterator`会获取一个哈希表的非安全迭代器，
+而`dictGetSafeIterator`通过调用`dictGetIterator`函数，同时`dictIterator.safe`设置为1，来获取一个哈希表的安全迭代器。
+
+`dictNext`接口时哈希表迭代器的迭代接口，其具体的使用方式为：
+```c
+    dictEntry* de = NULL;
+    while((de = dictNext(iterator)) != NULL)
+    {
+        //handle dictEntry
+    }
+```
+对于迭代器的第一次迭代：
+1. 非安全迭代器会从关联哈希表当前的状态计算出一个指纹值，将之复制给`dictIterator.fingerprint`，用于防止在迭代中对哈希表的错误使用，会在迭代器释放时，对哈希表的指纹值进行校验。
+2. 安全迭代器则会对`dict.iterators`字段执行加1的操作，如果`dict.iterators`大于零，那么原本在添加、查找操作中进行的单步重哈希就不会进行。
+
+`dictReleaseIterator`用来释放一个迭代器，如果释放的是非安全迭代器，那么在释放时，会重新计算哈希表的指纹，将其与之前存储的指纹进行比较，如果不一致，则会触发断言机制；
+如果是安全迭代器，怎么将关联的哈希表的`dict.iterators`字段减1，当这个字段减到0的话，那么就可以继续在添加，查找，删除的操作中继续执行单步重哈希操作`_dictRehashStep`。
+
+*为什么单步重哈希`_dictRehashStep`需要判断关联安全迭代器的数量，而心跳中的`dictRehashMilliseconds`则不需要？*
+
+这里作者没有给出解释，我个人的猜测是由于*Redis*对于核心数据的操作都是单线程模式进行的，
+心跳中的`dictRehashMilliseconds`，在执行时，会阻塞*Redis*的核心主线程，此时不会对于哈希表有其他的操作，因此不需要判断关联安全迭代器的数量。
+而对于哈希表的迭代器，在迭代的过程中有可能基于逻辑的需求而对哈希表进行增加，查找等操作，故此需要判断关联安全迭代器的数量。
+当然上述解释，是笔者的个人见解，如果后续发现和此处有矛盾的地方，会做特别说明和补充。
 
 ### Redis中用于扫描哈希表的操作接口
 ```c
@@ -576,6 +610,8 @@ unsigned long dictScan(dict *d, unsigned long v, dictScanFunction *fn, dictScanB
 * 如果从16个缩容到4个桶，那么0号桶、8号桶、4号桶以及12号桶中的元素，也就是`0000`、`1000`、`0100`和`1100`中的元素会被
 集中到新的`00`这个桶中，也就是新的0号桶中。
 
+![重哈希bucket的变化](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/%E9%87%8D%E5%93%88%E5%B8%8Cbucket%E7%9A%84%E5%8F%98%E5%8C%96.PNG)
+
 从上面的图示，我们可以发现，给定一个桶，在扩容过程中，桶中元素分散的目标桶一定是固定的；
 同时在缩容的过程中，这个桶也一定会从若干个固定的桶中收集元素。而这其中数量较多那组桶，
 其编号恰巧满足高位加1，同时向低位进位这一规律。这似乎隐约可以体会出，*Redis*作者使用这个跳跃的扫描方式的目的了。
@@ -613,6 +649,8 @@ unsigned long dictScan(dict *d, unsigned long v, dictScanFunction *fn, dictScanB
         } while (v & (m0 ^ m1));
 ```
 
+通过上述代码片段，我们可以发现，每次给定一个游标对正在重海西的哈希表进行扫描的时，总是会先访问小哈希表中对应索引的桶，
+然后在访问较大哈希表中对应的若干个桶，这样也就保证了，无论是扩容还是缩容，我们总能扫描到所有的元素，当然这也是为什么会出现元素被重复扫描的原因。
 
 
 ***
