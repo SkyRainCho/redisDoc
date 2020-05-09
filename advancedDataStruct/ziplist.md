@@ -152,7 +152,65 @@ void zipEntry(unsigned char *p, zlentry *e);
 
 ### 压缩链表长度操作
 
-### 压缩链表底层的插入、删除与连锁更新
+```c
+unsigned int zipIntSize(unsigned char encoding);
+```
+这个接口用于获取一个给定的整数编码格式所需的额外的`<entry-data>`存储空间，例如`ZIP_INT_8B`编码方式，会有1个字节的空间去存储节点的整数值。
+
+```c
+unsigned int zipStoreEntryEncoding(unsigned char *p, unsigned char encoding, unsigned int rawlen);
+```
+
+```c
+#define ZIP_DECODE_LENGTH(ptr, encoding, lensize, len)
+```
+
+```c
+int zipStorePrevEntryLengthLarge(unsigned char *p, unsigned int len);
+```
+
+```c
+unsigned int zipStorePrevEntryLength(unsigned char *p, unsigned int len);
+```
+
+```c
+#define ZIP_DECODE_PREVLENSIZE(ptr, prevlensize)
+```
+
+```c
+#define ZIP_DECODE_PREVLEN(ptr, prevlensize, prevlen)
+```
+
+```c
+int zipPrevLebByteDiff(unsigned char *p, unsigned int len);
+```
+
+```c
+unsigned int zipRawEntryLength(unsigned char *p);
+```
+
+### 压缩链表底层的插入、删除与连锁更新等操作
+
+```c
+int zipTryEncoding(unsigned char *entry, unsigned int entrylen, long long *v, unsigned char *encoding);
+```
+
+```c
+void zipSaveInteger(unsigned char *p, int64_t value, unsigned char encoding);
+int64_t zipLoadInteger(unsigned char *p, unsigned char encoding);
+```
+
+```c
+unsigned char *__ziplistCascadeUpdate(unsigned char *zl, unsigned char *p);
+```
+
+```c
+unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slen);
+```
+
+```c
+unsigned char *__ziplistDelete(unsigned char *zl, unsigned char *p, unsigned int num);
+```
 
 ## 压缩链表的用户接口
 
