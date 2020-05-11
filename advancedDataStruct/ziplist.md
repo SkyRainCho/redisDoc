@@ -161,29 +161,36 @@ unsigned int zipIntSize(unsigned char encoding);
 unsigned int zipStoreEntryEncoding(unsigned char *p, unsigned char encoding, unsigned int rawlen);
 ```
 
+
 ```c
 #define ZIP_DECODE_LENGTH(ptr, encoding, lensize, len)
 ```
+
 
 ```c
 int zipStorePrevEntryLengthLarge(unsigned char *p, unsigned int len);
 ```
 
+
 ```c
 unsigned int zipStorePrevEntryLength(unsigned char *p, unsigned int len);
 ```
+
 
 ```c
 #define ZIP_DECODE_PREVLENSIZE(ptr, prevlensize)
 ```
 
+
 ```c
 #define ZIP_DECODE_PREVLEN(ptr, prevlensize, prevlen)
 ```
 
+
 ```c
 int zipPrevLebByteDiff(unsigned char *p, unsigned int len);
 ```
+
 
 ```c
 unsigned int zipRawEntryLength(unsigned char *p);
@@ -195,24 +202,85 @@ unsigned int zipRawEntryLength(unsigned char *p);
 int zipTryEncoding(unsigned char *entry, unsigned int entrylen, long long *v, unsigned char *encoding);
 ```
 
+
 ```c
 void zipSaveInteger(unsigned char *p, int64_t value, unsigned char encoding);
 int64_t zipLoadInteger(unsigned char *p, unsigned char encoding);
 ```
 
+
 ```c
 unsigned char *__ziplistCascadeUpdate(unsigned char *zl, unsigned char *p);
 ```
+上面这个函数`__ziplistCascadeUpdate`便是处理压缩链表连锁更新的函数，而导致连锁更新的原因在于压缩链表中元素`<entry>`中的`<prevlen>`字段是变长的，当前元素的前一个元素的长度如果小于等于253个字节，那么`<prevlen>`字段只需要1个字节，否则就需要5个字节的存储空间。这也就意味着，压缩链表中一个元素`A`的内容所发生的变化，有可能会对`A`的后续元素`B`的内容产生影响，而`B`元素的变化则有可能对后续`C`元素的内容产生影响，以此类推，这便是产生连锁更新的原因。
+
+理想化的情况，对压缩链表中`A`节点的修改所导致的元素长度变化，恰好没有超越其后续元素`B`的`<prevlen>`字段所能表达的范围，那么变不会发生连锁更新的情况。
+
+而最坏的情况，则是对压缩链表中`A`元素的变化，会导致这个变化一直传递到链表的结尾，例如在链表中存在`A->B->C-D->E`这5个元素，每个元素的长度都在250到253之间，这样每个元素节点的`<prevlen>`字段只要1个字节，就可以表示前序元素的长度。当我们将第一个元素`A`的长度扩展到253以上时，会导致后续的`B`节点`<prevlen>`字段被扩展成5个字节，这样`B`节点的长度也超过了253个字节，这种变化会导致`C`节点被跟新，进而又会更新到`D`以及`E`两个节点
 
 ```c
 unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slen);
 ```
+这个函数`__ziplistInsert`用于实现压缩链表的底层插入操作
 
 ```c
 unsigned char *__ziplistDelete(unsigned char *zl, unsigned char *p, unsigned int num);
 ```
+这个函数用于处理压缩链表的底层删除操作
 
 ## 压缩链表的用户接口
+
+### 初始化与长度获取
+
+```c
+unsigned char *ziplistNew(void);
+unsigned int ziplistLen(unsigned char *zl);
+size_t ziplistBlobLen(unsigned char *zl);
+```
+
+
+
+### 插入与删除
+
+```c
+unsigned char *ziplistPush(unsigned char *zl, unsigned char *s, unsigned int slen, int where);
+unsigned char *ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slend);
+```
+
+
+
+```c
+unsigned char *ziplistDelete(unsigned char *zl, unsigned char **p);
+unsigned char *ziplistDeleteRange(unsigned char *zl, int index, unsigned int num);
+```
+
+
+
+### 遍历与查找获取
+
+```c
+unsigned char *ziplistNext(unsigned char *zl, unsigned char *p);
+unsigned char *ziplistPrev(unsigned char *zl, unsigned char *p);
+```
+
+
+
+```c
+unsigned char *ziplistIndex(unsigned char *zl, int index);
+unsigned int ziplistGet(unsigned char *zl, unsigned char **sval, unsigned int *slen, long long *lval);
+unsigned char *ziplistFind(unsigned char *zl, unsigned char *vstr, unsigned int vlen, unsigned int skip)
+```
+
+
+
+### 其他操作
+
+```c
+unsigned char *ziplistMerge(unsigned char **first, unsigned char **second);
+unsigned int ziplistCompare(unsigned char *p, unsigned char *s, unsigned int slen);
+```
+
+
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
