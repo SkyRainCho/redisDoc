@@ -1,4 +1,7 @@
+
+
 # Redis中压缩链表的实现
+
 前面我们已经介绍了*Redis*中所实现的经典双端链表了，而这种链表存在一个问题，便是在存储小数据的时候，
 内存使用效率过低，例如当一个链表节点中只保存一个字节的`unsigned char`数据时，我们需要为这个节点保存24个字节的额外数据，
 其中包含`listNode.prev`指针，`listNode.next`指针，以及指向具体数据的`listNode.value`指针，
@@ -160,7 +163,14 @@ unsigned int zipIntSize(unsigned char encoding);
 ```c
 unsigned int zipStoreEntryEncoding(unsigned char *p, unsigned char encoding, unsigned int rawlen);
 ```
+`zipStoreEntryEncoding`这个接口用于将数据对应的`encoding`以及其原始长度`rawlen`存储进`p`指针对应`<encoding>`的头部信息中，并返回这个头部数据的长度。
+如果不传入`p`指针，那么这个接口则可以用于计算一个数据所需要的`<encoding>`字段的长度。通常这个接口用于处理字符串类型的数据。
 
+```c
+int zipTryEncoding(unsigned char *entry, unsigned int entrylen, long long *v, unsigned char *encoding);
+```
+如果压缩列表中对应的这个`<entry>`是一个存储整形数的`<entry>`,
+这个函数则是会通过给定的`<entry>`以及其对应的元素长度`entrylen`，从其中解码出该节点的编码方式，以及存储的整数值。
 
 ```c
 #define ZIP_DECODE_LENGTH(ptr, encoding, lensize, len)
@@ -198,16 +208,14 @@ unsigned int zipRawEntryLength(unsigned char *p);
 
 ### 压缩链表底层的插入、删除与连锁更新等操作
 
-```c
-int zipTryEncoding(unsigned char *entry, unsigned int entrylen, long long *v, unsigned char *encoding);
-```
-
 
 ```c
 void zipSaveInteger(unsigned char *p, int64_t value, unsigned char encoding);
 int64_t zipLoadInteger(unsigned char *p, unsigned char encoding);
 ```
-
+函数`zipSaveInteger`用于根据给定的编码方式`encoding`，将`value`数值存储在`p`指针的位置中。
+而函数`zipLoadInteger`则是根据给定的编码方式`encoding`，从`p`指针指向的内存中，解码出相应的整数数值。
+这两个函数中的`p`指针都是指向`<entry>`节点中的`<entry-data>`字段，而非是`<entry>`的起始位置。
 
 ```c
 unsigned char *__ziplistCascadeUpdate(unsigned char *zl, unsigned char *p);
@@ -216,7 +224,7 @@ unsigned char *__ziplistCascadeUpdate(unsigned char *zl, unsigned char *p);
 
 理想化的情况，对压缩链表中`A`节点的修改所导致的元素长度变化，恰好没有超越其后续元素`B`的`<prevlen>`字段所能表达的范围，那么变不会发生连锁更新的情况。
 
-而最坏的情况，则是对压缩链表中`A`元素的变化，会导致这个变化一直传递到链表的结尾，例如在链表中存在`A->B->C-D->E`这5个元素，每个元素的长度都在250到253之间，这样每个元素节点的`<prevlen>`字段只要1个字节，就可以表示前序元素的长度。当我们将第一个元素`A`的长度扩展到253以上时，会导致后续的`B`节点`<prevlen>`字段被扩展成5个字节，这样`B`节点的长度也超过了253个字节，这种变化会导致`C`节点被跟新，进而又会更新到`D`以及`E`两个节点
+而最坏的情况，则是对压缩链表中`A`元素的变化，会导致这个变化一直传递到链表的结尾，例如在链表中存在`A->B->C-D->E`这5个元素，每个元素的长度都在250到253之间，这样每个元素节点的`<prevlen>`字段只要1个字节，就可以表示前序元素的长度。当我们将第一个元素`A`的长度扩展到253以上时，会导致后续的`B`节点`<prevlen>`字段被扩展成5个字节，这样`B`节点的长度也超过了253个字节，这种变化会导致`C`节点被更新，进而又会波及到`D`以及`E`两个节点。
 
 ```c
 unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slen);
