@@ -158,12 +158,24 @@ void zipEntry(unsigned char *p, zlentry *e);
 ```c
 unsigned int zipIntSize(unsigned char encoding);
 ```
-这个接口用于获取一个给定的整数编码格式所需的额外的`<entry-data>`存储空间，例如`ZIP_INT_8B`编码方式，会有1个字节的空间去存储节点的整数值。
+这个接口用于获取一个给定的整数编码格式所需的额外的`<entry-data>`存储空间，例如`ZIP_INT_8B`编码方式，会返回1个字节的空间去存储节点的整数值；而处于`ZIP_INT_IMM_MIN`以及`ZIP_INT_IMM_MAX`之间的`encoding`由于是使用`encoding`本身来存储数据的，因此会返回0。
 
 ```c
 unsigned int zipStoreEntryEncoding(unsigned char *p, unsigned char encoding, unsigned int rawlen);
+unsigned int zipStorePrevEntryLength(unsigned char *p, unsigned int len);
 ```
-`zipStoreEntryEncoding`这个接口用于将数据对应的`encoding`以及其原始长度`rawlen`存储进`p`指针对应`<encoding>`的头部信息中，并返回这个头部数据的长度。
+上面这两个接口函数功能比较类似，分别是用来处理`<prevlen>`字段数据以及`<encoding>`字段数据的函数。
+
+其中`zipStorePrevEntryLength`函数主要用于给定`len`长度数据，计算其编码压缩链表元素`<prevlen>`字段所需的长度，并通过该函数返回；如果传入了`p`指针，那么会将数据编码到`p`指针指向的内存中。
+
+而`zipStoreEntryEncoding`这个函数主要有两个用途：
+
+1. 不传入指针`p`，那么这个函数会返回给定的`encoding`参数以及`rawlen`参数所需的的`<encoding>`字段的长度。
+2. 传入指针`p`，那么这个函数会将`encoding`以及`rawlen`数据存在到`p`指针所指向的内存中。
+
+需要注意的细节是，如果传入指针`p`参数，那么`p`应该指向的是压缩链表节点中的`<encoding>`字段。
+
+用于将数据对应的`encoding`以及其原始长度`rawlen`存储进`p`指针对应`<encoding>`的头部信息中，并返回这个头部数据的长度。
 如果不传入`p`指针，那么这个接口则可以用于计算一个数据所需要的`<encoding>`字段的长度。通常这个接口用于处理字符串类型的数据。
 
 ```c
@@ -175,36 +187,37 @@ int zipTryEncoding(unsigned char *entry, unsigned int entrylen, long long *v, un
 ```c
 #define ZIP_DECODE_LENGTH(ptr, encoding, lensize, len)
 ```
-
+这个宏定义
 
 ```c
 int zipStorePrevEntryLengthLarge(unsigned char *p, unsigned int len);
 ```
-
+这个接口
 
 ```c
 unsigned int zipStorePrevEntryLength(unsigned char *p, unsigned int len);
 ```
-
+这个接口
 
 ```c
 #define ZIP_DECODE_PREVLENSIZE(ptr, prevlensize)
 ```
-
+这个宏定义
 
 ```c
 #define ZIP_DECODE_PREVLEN(ptr, prevlensize, prevlen)
 ```
-
+这个宏定义
 
 ```c
 int zipPrevLebByteDiff(unsigned char *p, unsigned int len);
 ```
-
+这个函数
 
 ```c
 unsigned int zipRawEntryLength(unsigned char *p);
 ```
+这个函数
 
 ### 压缩链表底层的插入、删除与连锁更新等操作
 
