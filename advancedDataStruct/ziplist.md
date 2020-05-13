@@ -160,9 +160,19 @@ unsigned int zipIntSize(unsigned char encoding);
 ```
 这个接口用于获取一个给定的整数编码格式所需的额外的`<entry-data>`存储空间，例如`ZIP_INT_8B`编码方式，会返回1个字节的空间去存储节点的整数值；而处于`ZIP_INT_IMM_MIN`以及`ZIP_INT_IMM_MAX`之间的`encoding`由于是使用`encoding`本身来存储数据的，因此会返回0。
 
+
+
 ```c
-unsigned int zipStoreEntryEncoding(unsigned char *p, unsigned char encoding, unsigned int rawlen);
+int zipTryEncoding(unsigned char *entry, unsigned int entrylen, long long *v, unsigned char *encoding);
+```
+
+这个函数用于判断`entry`指针以及`entrylen`所描述的内存中保存的字符串是否是整形数。如果是整形数，那么会通过`v`返回这个整型数值，并通过`encoding`返回这个整数对应的编码，同时函数返回1；如果这段内存中的字符串无法被转化整数，那么这个函数会返回0，表示这个是一个字符串形式的数据。
+
+
+
+```c
 unsigned int zipStorePrevEntryLength(unsigned char *p, unsigned int len);
+unsigned int zipStoreEntryEncoding(unsigned char *p, unsigned char encoding, unsigned int rawlen);
 ```
 上面这两个接口函数功能比较类似，分别是用来处理`<prevlen>`字段数据以及`<encoding>`字段数据的函数。
 
@@ -175,49 +185,65 @@ unsigned int zipStorePrevEntryLength(unsigned char *p, unsigned int len);
 
 需要注意的细节是，如果传入指针`p`参数，那么`p`应该指向的是压缩链表节点中的`<encoding>`字段。
 
-用于将数据对应的`encoding`以及其原始长度`rawlen`存储进`p`指针对应`<encoding>`的头部信息中，并返回这个头部数据的长度。
-如果不传入`p`指针，那么这个接口则可以用于计算一个数据所需要的`<encoding>`字段的长度。通常这个接口用于处理字符串类型的数据。
-
 ```c
-int zipTryEncoding(unsigned char *entry, unsigned int entrylen, long long *v, unsigned char *encoding);
+unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slen)
+{
+    ...
+    reqlen += zipStorePrevEntryLength(NULL, prevlen);
+    reqlen += zipStoreEntryEncoding(NULL, encoding, slen);
+    ...
+    zl = ziplistResize(zl, curlen+reqlen+nextdiff);
+    ...
+    
+    p += zipStorePrevEntryLength(p, prevlen);
+    p += zipStoreEntryEncoding(p, encoding, slen);
+    ...
+    
+}
 ```
-如果压缩列表中对应的这个`<entry>`是一个存储整形数的`<entry>`,
-这个函数则是会通过给定的`<entry>`以及其对应的元素长度`entrylen`，从其中解码出该节点的编码方式，以及存储的整数值。
 
-```c
-#define ZIP_DECODE_LENGTH(ptr, encoding, lensize, len)
-```
-这个宏定义
+如上述代码段所示，上述的两个函数通常会搭配在一起使用，用于初始化压缩链表节点的头部数据，一般情况会先进行一次`p`为`NULL`的调用，以获取待操作数据的所对应的头部节点数据的长度，然后在进行一次传入有效指针`p`的调用，将相关数据写入压缩链表的节点中。
+
+
 
 ```c
 int zipStorePrevEntryLengthLarge(unsigned char *p, unsigned int len);
 ```
-这个接口
+
+这个函数与`zipStrorePrevEntryLength`函数类似，专门用于处理长度超过253个字节的`<prevlen>`数据的处理。
+
+
 
 ```c
-unsigned int zipStorePrevEntryLength(unsigned char *p, unsigned int len);
+#define ZIP_ENTRY_ENCODING(ptr, encoding)
+#define ZIP_DECODE_LENGTH(ptr, encoding, lensize, len)
 ```
-这个接口
+
+`ZIP_ENTRY_ENCODING`这个宏定义用于从`<encoding>`对应的`ptr`指针中，解码出这个对应的压缩链表元素所使用的编码方式。
+
+`ZIP_DECODE_LENGTH`这个宏定义用于从一个`<encoding>`字段的起始指针`ptr`中，解码出这个对应的压缩链表元素所使用的编码方式`encoding`，`<encoding>`字段中表示后续数据长度的字节的长度`lensize`，以及这个对应节点元素的数据占用的内存长度`len`。
+
+
 
 ```c
 #define ZIP_DECODE_PREVLENSIZE(ptr, prevlensize)
-```
-这个宏定义
-
-```c
 #define ZIP_DECODE_PREVLEN(ptr, prevlensize, prevlen)
 ```
-这个宏定义
+`ZIP_DECODE_PREVLENSIZE`这个宏定义用于从`<prevlen>`字段对应的指针`ptr`中，解码出`<prevlen>`字段所需要的长度，1个字节或者5个字节。`ZIP_DECODE_PREVLEN`这个宏定义用于从`<prevlen>`字段对应的指针`ptr`中，解码出字段长度，以及其中存储的长度数值。
+
+
 
 ```c
 int zipPrevLebByteDiff(unsigned char *p, unsigned int len);
 ```
-这个函数
+这个函数用于计算一个压缩链表节点的`<prevlen>`中的长度值与`len`的长度差值。
 
 ```c
 unsigned int zipRawEntryLength(unsigned char *p);
 ```
-这个函数
+这个函数会通过调用`ZIP_DECODE_PREVLENSIZE`以及`ZIP_DECODE_LENGTH`来计算一个压缩链表节点的占用内存的长度。
+
+
 
 ### 压缩链表底层的插入、删除与连锁更新等操作
 
@@ -242,12 +268,12 @@ unsigned char *__ziplistCascadeUpdate(unsigned char *zl, unsigned char *p);
 ```c
 unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slen);
 ```
-这个函数`__ziplistInsert`用于实现压缩链表的底层插入操作
+这个函数`__ziplistInsert`用于实现压缩链表的底层插入操作，其中`s`指针以及`slen`用于标记待插入的字符串数据，如果这个字符串数据可以被转化整数形式，该接口会用按照整数进行插入，否则的话，会按照字符串的形式进行插入，而`p`则是标记了插入的位置。
 
 ```c
 unsigned char *__ziplistDelete(unsigned char *zl, unsigned char *p, unsigned int num);
 ```
-这个函数用于处理压缩链表的底层删除操作
+这个函数`__ziplistDelete`用于处理压缩链表的底层删除操作
 
 ## 压缩链表的用户接口
 
@@ -255,11 +281,45 @@ unsigned char *__ziplistDelete(unsigned char *zl, unsigned char *p, unsigned int
 
 ```c
 unsigned char *ziplistNew(void);
+unsigned char *ziplistResize(unsigned char *zl, unsigned int len);
 unsigned int ziplistLen(unsigned char *zl);
 size_t ziplistBlobLen(unsigned char *zl);
 ```
 
+其中`ziplistNew`函数用于返回一个空的，只包含`<zlbytes>`、`<zltail>`、`<zllen>`以及`<zlend>`字段的数据，从它的代码实现中，我们也是可以窥探到其在内存中的分布格式：
 
+```c
+unsigned char *ziplistNew(void)
+{
+    unsigned int bytes = ZIPLIST_HEADER_SIZE+ZIPLIST_END_SIZE;
+    unsigned char *zl = zmalloc(bytes);
+    ZIPLIST_BYTES(zl) = intrev32ifbe(bytes);
+    ZIPLIST_TAIL_OFFSET(zl) = intrev32ifbe(ZIPLIST_HEADER_SIZE);
+    ZIPLIST_LENGTH(zl) = 0;
+    zl[bytes-1] = ZIP_END;
+    return zl;
+}
+```
+
+函数`ziplistLen`函数则是会获取给定压缩列表中节点的个数，该函数首先会判断`<zllen>`字段中存储的节点个数，如果其存储的个数小于`UINT16_MAX`，那么这便是实际的个数值；否则会对整个链表进行遍历，以获取其中节点的真实个数：
+
+```c
+unsigned int ziplistLen(unsigned char *zl)
+{
+    unsigned int len = 0;
+    ...
+    unsigned char *p = zl+ZIPLIST_HEADER_SIZE;
+    while (*p != ZIP_END)
+    {
+        p += zipRawEntryLength(p);
+        len ++;
+    }
+    ...
+    return len;
+}
+```
+
+这里代码给出对于压缩链表节点遍历的一种范式，通过`zipRawEntryLength`来计算指针`p`对应的节点长度，将指针向后移动相应的长度，便实现了移动到下一个节点的操作。
 
 ### 插入与删除
 
