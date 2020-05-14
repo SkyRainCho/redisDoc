@@ -271,15 +271,14 @@ unsigned char *__ziplistCascadeUpdate(unsigned char *zl, unsigned char *p);
 
 ```c
 unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slen);
-```
-这个函数`__ziplistInsert`用于实现压缩链表的底层插入操作，其中`s`指针以及`slen`用于标记待插入的字符串数据，如果这个字符串数据可以被转化整数形式，该接口会用按照整数进行插入，否则的话，会按照字符串的形式进行插入，而`p`则是标记了插入的位置。
-
-
-
-```c
 unsigned char *__ziplistDelete(unsigned char *zl, unsigned char *p, unsigned int num);
 ```
-这个函数`__ziplistDelete`用于处理压缩链表的底层删除操作，其中`p`为被删除的起始节点指针，`num`则表示需要被删除的节点的个数。
+1. 函数`__ziplistInsert`用于实现压缩链表的底层插入操作，其中`s`指针以及`slen`用于标记待插入的字符串数据，如果这个字符串数据可以被转化整数形式，该接口会用按照整数进行插入，否则的话，会按照字符串的形式进行插入，而`p`则是标记了插入的位置。
+2. 函数`__ziplistDelete`用于处理压缩链表的底层删除操作，其中`p`为被删除的起始节点指针，`num`则表示需要被删除的节点的个数。
+
+上述两个函数都会调用`ziplistResize`对整个压缩列表所占用的内存进行扩容或者缩容，因此所传入的`zl`参数可能会在调用结束后失效，应该使用函数返回的指针作为更新后的压缩链表的参数，而当执行完插入或者删除操作之后，会调用`__ziplistCascadeUpdate`来对`p`位置操作后的后续节点尝试进行连锁更新，刷新后续节点的`<prevlen>`字段。
+
+
 
 ## 压缩链表的用户接口
 
@@ -386,11 +385,15 @@ unsigned char *ziplistPrev(unsigned char *zl, unsigned char *p);
 
 ```c
 unsigned char *ziplistIndex(unsigned char *zl, int index);
-unsigned int ziplistGet(unsigned char *zl, unsigned char **sval, unsigned int *slen, long long *lval);
+unsigned int ziplistGet(unsigned char *p, unsigned char **sval, unsigned int *slen, long long *lval);
 unsigned char *ziplistFind(unsigned char *zl, unsigned char *vstr, unsigned int vlen, unsigned int skip)
 ```
 
+上述的三个接口函数的作用是从压缩列表之中获取或这个查找某一个元素的，
 
+1. `ziplistIndex`接口从压缩链表中返回索引为`index`的节点的指针，该函数既支持正数的`index`索引，用于从前向后遍历；同时也支持负数的`index`索引，用于从后向前遍历。
+2. `ziplistGet`函数用于从`p`指针所指向的链表节点中解析出其存储的数据，如果该节点的数据是按照字符串进行编码的话，那么会通过`sval`以及`slen`字段进行返回；如果是按照整数方式进行编码的话，那么会通过`lval`数值进行返回。
+3. `ziplistFind`用于从`p`指针对应的节点开始，以`skip`为跳数，来查找是否存在所存储的数据等于`vstr`的节点。如果找到，那么会返回这个节点的指针，否则会返回`NULL`。如果这个`skip`传入0的话，那么意味着按照顺序从`p`节点开始依次向后查找，不会跳过任何一个节点。
 
 ### 其他操作
 
