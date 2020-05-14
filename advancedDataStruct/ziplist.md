@@ -256,6 +256,8 @@ int64_t zipLoadInteger(unsigned char *p, unsigned char encoding);
 而函数`zipLoadInteger`则是根据给定的编码方式`encoding`，从`p`指针指向的内存中，解码出相应的整数数值。
 这两个函数中的`p`指针都是指向`<entry>`节点中的`<entry-data>`字段，而非是`<entry>`的起始位置。
 
+
+
 ```c
 unsigned char *__ziplistCascadeUpdate(unsigned char *zl, unsigned char *p);
 ```
@@ -265,10 +267,14 @@ unsigned char *__ziplistCascadeUpdate(unsigned char *zl, unsigned char *p);
 
 而最坏的情况，则是对压缩链表中`A`元素的变化，会导致这个变化一直传递到链表的结尾，例如在链表中存在`A->B->C-D->E`这5个元素，每个元素的长度都在250到253之间，这样每个元素节点的`<prevlen>`字段只要1个字节，就可以表示前序元素的长度。当我们将第一个元素`A`的长度扩展到253以上时，会导致后续的`B`节点`<prevlen>`字段被扩展成5个字节，这样`B`节点的长度也超过了253个字节，这种变化会导致`C`节点被更新，进而又会波及到`D`以及`E`两个节点。
 
+
+
 ```c
 unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slen);
 ```
 这个函数`__ziplistInsert`用于实现压缩链表的底层插入操作，其中`s`指针以及`slen`用于标记待插入的字符串数据，如果这个字符串数据可以被转化整数形式，该接口会用按照整数进行插入，否则的话，会按照字符串的形式进行插入，而`p`则是标记了插入的位置。
+
+
 
 ```c
 unsigned char *__ziplistDelete(unsigned char *zl, unsigned char *p, unsigned int num);
@@ -329,6 +335,11 @@ unsigned char *ziplistPush(unsigned char *zl, unsigned char *s, unsigned int sle
 unsigned char *ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slend);
 ```
 
+这两个函数主要用于对压缩链表执行插入操作，其底层都是使用`__ziplistInsert`函数实现的插入操作，其中：
+
+1. `ziplistPush`用于实现向压缩链表的两端进行插入操作。`where`参数用于标记是向链表的头部还是尾部进行插入，在*src/ziplist.h*头文件中定义了`ZIPLIST_HEAD`以及`ZIPLIST_TAIL`分别用于表示链表头部和链表尾部。
+2. `ziplistInsert`用于实现向压缩链表的指定位置进行插入操作。
+
 
 
 ```c
@@ -336,7 +347,23 @@ unsigned char *ziplistDelete(unsigned char *zl, unsigned char **p);
 unsigned char *ziplistDeleteRange(unsigned char *zl, int index, unsigned int num);
 ```
 
+上面两个函数都是用于执行从压缩链表中删除节点的操作，底层都是使用`__ziplistDelete`函数来实现实际的删除操作：
 
+1. `ziplistDelete`函数用于删除给定的单一节点，这个函数会用过`p`指针来指定需要被删除的节点，并返回删除节点后新的链表指针，同时会原地更新`p`指针，通过这种实现方式，可以实现在删除节点的同时，遍历整个链表：
+
+   ```c
+   while (ziplist(p, &entry, &elen, &value))
+   {
+     ...
+     zl = ziplistDelete(zl, &p);
+     p = ziplistPrev(zl, p)
+     ...
+   }
+   ```
+
+   
+
+2. `ziplistDeleteRange`函数用于从压缩链表的给定索引`index`开始，删除`num`个节点，并返回删除之后新的压缩链表指针。
 
 ### 遍历与查找获取
 
@@ -345,7 +372,17 @@ unsigned char *ziplistNext(unsigned char *zl, unsigned char *p);
 unsigned char *ziplistPrev(unsigned char *zl, unsigned char *p);
 ```
 
+上述两个函数是压缩链表中对节点实现正向与反向遍历的方法，相当于使用`listNode.prev`以及`listNode.next`对链表执行遍历：
 
+1. `ziplistNext`用于返回压缩链表`zl`中`p`节点的下一个节点的指针，通过`p += zipRawEntryLength(p)`来实现指针的移动。
+
+2. `ziplistPrev`用于返回压缩链表`zl`中`p`节点的前一个节点的指针，其实现细节为：
+
+   * `p`节点为`ZIP_END`节点，那么使用`ZIPLIST_ENTRY_TAIL`来返回最后一个节点的指针。
+   * 如果`p`节点为压缩链表中的第一个节点，那么该函数返回`NULL`。
+   * `p`节点处于链表中，那么通过`ZIP_DECODE_PREVLEN`来获取`<prevlen>`存储的长度信息，将`p`指针向前移动，便可以找到其前一个节点。
+
+   
 
 ```c
 unsigned char *ziplistIndex(unsigned char *zl, int index);

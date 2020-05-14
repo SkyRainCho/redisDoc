@@ -4,4 +4,5 @@
 ## 基础数据类型
 
 * [双端链表实现](baseDataStruct/adlist.md)
-
+* [动态字符串实现](baseDataStruct/sds.md)
+* [哈希表实现](baseDataStruct/dict.md)
