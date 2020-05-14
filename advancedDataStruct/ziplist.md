@@ -273,7 +273,7 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
 ```c
 unsigned char *__ziplistDelete(unsigned char *zl, unsigned char *p, unsigned int num);
 ```
-这个函数`__ziplistDelete`用于处理压缩链表的底层删除操作
+这个函数`__ziplistDelete`用于处理压缩链表的底层删除操作，其中`p`为被删除的起始节点指针，`num`则表示需要被删除的节点的个数。
 
 ## 压缩链表的用户接口
 
@@ -286,8 +286,7 @@ unsigned int ziplistLen(unsigned char *zl);
 size_t ziplistBlobLen(unsigned char *zl);
 ```
 
-其中`ziplistNew`函数用于返回一个空的，只包含`<zlbytes>`、`<zltail>`、`<zllen>`以及`<zlend>`字段的数据，从它的代码实现中，我们也是可以窥探到其在内存中的分布格式：
-
+1. `ziplistNew`函数用于返回一个空的，只包含`<zlbytes>`、`<zltail>`、`<zllen>`以及`<zlend>`字段的数据，从它的代码实现中，我们也是可以窥探到其在内存中的分布格式：
 ```c
 unsigned char *ziplistNew(void)
 {
@@ -301,8 +300,9 @@ unsigned char *ziplistNew(void)
 }
 ```
 
-函数`ziplistLen`函数则是会获取给定压缩列表中节点的个数，该函数首先会判断`<zllen>`字段中存储的节点个数，如果其存储的个数小于`UINT16_MAX`，那么这便是实际的个数值；否则会对整个链表进行遍历，以获取其中节点的真实个数：
+2. `ziplistResize`用于在更新压缩链表的大小，这个函数用于在压缩链表执行插入、删除以及连锁更新的时候，通过调用`zrealloc`去更新压缩链表占用的内存的大小，并将更新后的内存大小写入`<zlbytes>`字段中。
 
+3. 函数`ziplistLen`函数则是会获取给定压缩列表中节点的个数，该函数首先会判断`<zllen>`字段中存储的节点个数，如果其存储的个数小于`UINT16_MAX`，那么这便是实际的个数值；否则会对整个链表进行遍历，以获取其中节点的真实个数：
 ```c
 unsigned int ziplistLen(unsigned char *zl)
 {
@@ -318,8 +318,9 @@ unsigned int ziplistLen(unsigned char *zl)
     return len;
 }
 ```
-
 这里代码给出对于压缩链表节点遍历的一种范式，通过`zipRawEntryLength`来计算指针`p`对应的节点长度，将指针向后移动相应的长度，便实现了移动到下一个节点的操作。
+
+4. `ziplistBlobLen`函数则是通过解码`<zlbytes>`中的数据获取整个压缩链表所占用的内存大小。
 
 ### 插入与删除
 
