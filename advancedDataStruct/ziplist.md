@@ -387,19 +387,64 @@ unsigned char *ziplistPrev(unsigned char *zl, unsigned char *p);
 unsigned char *ziplistIndex(unsigned char *zl, int index);
 unsigned int ziplistGet(unsigned char *p, unsigned char **sval, unsigned int *slen, long long *lval);
 unsigned char *ziplistFind(unsigned char *zl, unsigned char *vstr, unsigned int vlen, unsigned int skip)
+unsigned int ziplistCompare(unsigned char *p, unsigned char *s, unsigned int slen);
 ```
 
-上述的三个接口函数的作用是从压缩列表之中获取或这个查找某一个元素的，
+上述的四个接口函数的作用是从压缩列表之中获取或这个查找某一个元素的，
 
 1. `ziplistIndex`接口从压缩链表中返回索引为`index`的节点的指针，该函数既支持正数的`index`索引，用于从前向后遍历；同时也支持负数的`index`索引，用于从后向前遍历。
 2. `ziplistGet`函数用于从`p`指针所指向的链表节点中解析出其存储的数据，如果该节点的数据是按照字符串进行编码的话，那么会通过`sval`以及`slen`字段进行返回；如果是按照整数方式进行编码的话，那么会通过`lval`数值进行返回。
 3. `ziplistFind`用于从`p`指针对应的节点开始，以`skip`为跳数，来查找是否存在所存储的数据等于`vstr`的节点。如果找到，那么会返回这个节点的指针，否则会返回`NULL`。如果这个`skip`传入0的话，那么意味着按照顺序从`p`节点开始依次向后查找，不会跳过任何一个节点。
+4. `ziplistCompare`函数则会用于比较`p`指针对应的压缩链表节点中的数据是否等于`sstr`以及`slen`参数描述的数据。在执行比较操作时，会根据`p`节点的编码形式，如果是字符串编码，那么直接调用`memcmp`系统函数进行比较；如果是整数编码，则会对对应的数据进行解码，然后执行整数比较的操作。最终的结果如果相同，那么函数返回1，否则函数返回0。
 
 ### 其他操作
 
 ```c
 unsigned char *ziplistMerge(unsigned char **first, unsigned char **second);
-unsigned int ziplistCompare(unsigned char *p, unsigned char *s, unsigned int slen);
+```
+
+`ziplistMerge`函数用于合并两个链表，将`second`链表中的内容会被连接到`first`链表的内容之后，合并成功后，该函数会返回指向新的链表的指针。其中**较长**的链表将会被重新分配内存以存储所有的节点元素，这个**较长**的链表`target`既可以是`first`也可以是`second`，而另外一个链表的内容在合并之后，将会被释放掉。
+
+```c
+if (first_len >= second_len)
+{
+  target = *first;
+  target_bytes = first_bytes;
+  source = *second;
+  source_bytes = second_bytes;
+  append = 1;
+}
+else
+{
+  target = *second;
+  target_bytes = second_bytes;
+  source = *first;
+  source_bytes = first_bytes;
+  append = 0;
+}
+```
+
+
+
+1. 如果`first`链表是**较长**链表`target`的话，那么会通过`memcpy`调用，将**较短**链表的链表节点拷贝到`target`链表中。
+
+   ```c
+   memcpy(target+target_bytes-ZIPLIST_END_SZIE, source+ZIPLIST_HEADER_SIZE, 
+         source_bytes - ZIPLIST_HEADER_SIZE);
+   ```
+
+2. 如果`second`链表是**较长**链表`target`的话，那么首先会调用`memmove`，将`second`链表中的元素移动到链表尾部，以便为`first`链表中的节点预留空间；然后调用`memcpy`函数，将`first`链表中的节点拷贝到新的链表中。
+
+   ```c
+   memmove(target+source_bytes-ZIPLIST_END_SIZE, target+ZIPLIST_HEADER_SIZE,
+          target_bytes - ZIPLIST_HEADER_SIZE);
+   memcpy(target, source, source_bytes - ZIPLIST_END_SIZE);
+   ```
+
+最后由于执行了两个链表的连接操作，那么需要对连接处节点调用`__ziplistCascadeUpdate`的连锁更新，以维护`<prevlen>`字段数据的正确性。
+
+```c
+target = __ziplistCascadeUpdate(target, target+first_offset);
 ```
 
 
