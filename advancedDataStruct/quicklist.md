@@ -14,7 +14,6 @@ unsigned int lzf_decompress(const void *const in_data, unsigned int in_len, void
 ```
 
 其中快速链表节点`quicklistNode`的数据结构如下所示：
-
 ```c
 typedef struct quicklistNode {
     struct quicklistNode *prev;
@@ -29,9 +28,16 @@ typedef struct quicklistNode {
     unsigned int extra : 10;
 } quicklistNode;
 ```
+在这个数据结构之中，
+* `quicklistNode.prev`和`quicklistNode.next`这两节点作为双端链表的必要成员变量，用于指向当前节点的前序节点以及后续节点。
+* `quicklistNode.zl`，这个成员变量用于指向存储数据的内存，内存中可以是一个压缩链表，也可以是一个经过*LZF*算法压缩过的数据。
+* `quicklistNode.sz`，这个成员变量永远都会存储`quicklistNode`中压缩链表所占用的内存的长度，即使`quicklistNode.zl`中存储的是经过*LZF*算法压缩后的数据。
+* `quicklistNode.count`，用于存储在这个节点中的压缩率链表里数据节点的个数。
+* `quicklistNode.encoding`，用于表示这个节点中存储的数据是原始的压缩链表，还是经过*LZF*压缩过的数据，对于成员变量，*Redis*给出了两个定义，`QUICKLIST_NODE_ENCODING_RAW`用于表示当前`quicklistNode.zl`中存储的是原始的压缩链表；`QUICKLIST_NODE_ENCODING_LZF`用于表示当前`quicklistNode.zl`中存储的是经过*LZF*压缩的数据。
+* `quicklistNode.container`，用于表示当前这个节点所使用的容器类型，*Redis*给出两个容器类型的定义，`QUICKLIST_NODE_CONTAINER_NONE`，这个定义在代码中并未使用；`QUICKLIST_NODE_CONTAINER_ZIPLIST`，这个定义便是当前节点是使用压缩链表进行数据存储的。
+* `quicklistNode.recompress`，用于表示当前的节点是否处于临时被解压状态。
 
-* 
-
+如果在
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
 
