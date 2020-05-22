@@ -37,7 +37,39 @@ typedef struct quicklistNode {
 * `quicklistNode.container`，用于表示当前这个节点所使用的容器类型，*Redis*给出两个容器类型的定义，`QUICKLIST_NODE_CONTAINER_NONE`，这个定义在代码中并未使用；`QUICKLIST_NODE_CONTAINER_ZIPLIST`，这个定义便是当前节点是使用压缩链表进行数据存储的。
 * `quicklistNode.recompress`，用于表示当前的节点是否处于临时被解压状态。
 
-如果在
+如果`quicklistNode.encoding`是`QUICKLIST_NODE_ENCODING_LZF`时，那么表示这个节点在`quicklistNode.zl`中存储的是一个经过*LZF*压缩的数据，对于压缩数据，*Redis*也定义了对应的数据类型：
+
+```c
+typedef struct quicklistLZF
+{
+    unsigned int sz;
+    char compressed[];
+} quicklistLZF;
+```
+
+这里`quicklistLZF.sz`存储的是压缩数据的大小，`quicklistLZF.compressed`则是存储压缩数据的具体内容。这里需要注意区别`quicklisLZF.sz`和`quicklistNode.sz`这两个字段，`quicklistNode.sz`之所以要永远记录原始压缩链表的大小，是为了在对`quicklistNode`节点进行某些操作时，可以不解压*LZF*数据，便可以确定原始数据的大小。
+
+快速链表数据结构`quicklist`便是以双端链表的形式，组织维护所有的`quicklistNode`节点的，下面便是`quicklist`的数据结构：
+
+```c
+typedef struct quicklist
+{
+    quicklistNode *head;
+    quicklistNode *tail;
+    unsigned long count;
+    unsigned long len;
+    int fill : 16;
+    unsigned int compress : 16;
+} quicklist;
+```
+
+* `quicklist.head`和`quicklist.tail`两个指针分别指向了快速链表的头节点与尾节点。
+* `quicklist.count`用于标记这个快速链表中的数据节点的个数，`quicklist.len`则是标记了快速链表节点`quicklistNode`的个数，这两个字段的区别需要注意。
+* `quicklist.fill`是快速链表的装载因子，对于这个装载因子，有两种情况：
+  1. 如果装载因子为正数，那么表示每一个快速链表节点`quicklistNode`中存储数据节点的个数的上限，例如`quicklist.fill`被设置成10，那么意味着每个`quicklisNode`的压缩链表中最多只能存储10个数据节点。
+  2. 如果装载因子为负数，则标记了每个`quicklistNode`中压缩链表的最大内存大小，也就是`quicklistNode.sz`字段的上限。
+* `quicklist.compress`则是这个压缩链表的压缩深度。
+
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
 
