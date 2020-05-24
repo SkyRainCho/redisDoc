@@ -37,6 +37,8 @@ typedef struct quicklistNode {
 * `quicklistNode.container`，用于表示当前这个节点所使用的容器类型，*Redis*给出两个容器类型的定义，`QUICKLIST_NODE_CONTAINER_NONE`，这个定义在代码中并未使用；`QUICKLIST_NODE_CONTAINER_ZIPLIST`，这个定义便是当前节点是使用压缩链表进行数据存储的。
 * `quicklistNode.recompress`，用于表示当前的节点是否处于临时被解压状态。
 
+在本篇文章中，将会使用**链表节点**来表示`quicklistNode`，同时使用**数据节点**来表示存储在`quicklistNode`的压缩链表种的数据。
+
 如果`quicklistNode.encoding`是`QUICKLIST_NODE_ENCODING_LZF`时，那么表示这个节点在`quicklistNode.zl`中存储的是一个经过*LZF*压缩的数据，对于压缩数据，*Redis*也定义了对应的数据类型：
 
 ```c
@@ -68,7 +70,64 @@ typedef struct quicklist
 * `quicklist.fill`是快速链表的装载因子，对于这个装载因子，有两种情况：
   1. 如果装载因子为正数，那么表示每一个快速链表节点`quicklistNode`中存储数据节点的个数的上限，例如`quicklist.fill`被设置成10，那么意味着每个`quicklisNode`的压缩链表中最多只能存储10个数据节点。
   2. 如果装载因子为负数，则标记了每个`quicklistNode`中压缩链表的最大内存大小，也就是`quicklistNode.sz`字段的上限。
-* `quicklist.compress`则是这个压缩链表的压缩深度。
+* `quicklist.compress`则是这个压缩链表的压缩深度，因为前面已经提到过双端链表的访问主要集中在链表的两端，因此快速链表使用这个字段来确定在链表两端不被压缩的链表节点`quicklistNode`的个数；另外通常下情况下，链表处于中间的`quicklistNode`都是使用的*LZF*算法压缩后的数据，只有在需要访问的时候，才会被临时解压出来。
+
+同样的，为了实现对这个快速链表中**数据节点**的遍历，*Redis*设计了快速链表迭代器的数据结构：
+```c
+typedef struct quicklistIter
+{
+    const quicklist *quicklist;
+    quicklistNode *current;
+    unsigned char *zi;
+    long offset;
+    int direction;
+} quicklistIter;
+```
+在这个数据结构中
+* `quicklistIter.quicklist`表示这个迭代器所绑定的快速链表。
+* `quicklistIter.current`表示这个迭代器当前遍历到的**链表节点**。
+* `quicklistIter.si`表示这个迭代器当前遍历的**数据节点**。
+* `quicklistIter.offset`表示这个迭代器当前遍历的**数据节点**在**链表节点**之中的偏移。
+* `quicklistIter.direction`表示这个迭代器的遍历方向，*Redis*在*src/quicklist.h*头文件中定义了迭代器的遍历方向，`AL_START_HEAD`为正向遍历，`AL_START_TAIL`为反向遍历。
+
+与压缩链表中所定义的`zlentry`数据节点用以描述压缩链表中的节点类似，快速链表中也定义了类似的数据结构用来描述**数据节点**：
+```c
+typedef struct quicklistEntry
+{
+    const quicklist *quicklist;
+    quicklistNode *node;
+    unsigned char *zi;
+    unsigned char *value;
+    long long longval;
+    unsigned int sz;
+    int offset;
+} quicklistEntry;
+```
+在这个数据结构中：
+* `quicklistEntry.quicklist`指向这个**数据节点**所在的快速链表；`quicklistEntry.node`指向这个**数据节点**所在的**链表节点**；`quicklistEntry.zi`指向**数据节点**在**链表节点**之中的位置。
+* 如果**数据节点**中存储的是字符串编码的数据，那么`quicklistEntry.value`和`quicklistEntry.sz`这两个字段用来标记这个字符串编码数据。
+* 如果**数据节点**中存储的是整数编码的数据，那么会从对应的压缩链表中解码出这个整数数据，将之存储在`quicklistEntry.longval`字段中。
+* `quiclistEntry.offset`的含义与`quicklistIter.offset`一致，都是表示当前**数据节点**在**链表节点**的压缩链表中的偏移。
+
+## 快速链表操作接口
+
+### 快速链表的创建、释放与初始化
+
+### 快速链表节点的插入
+
+### 快速链表节点的删除
+
+### 快速链表节点的访问
+
+### 快速链表的遍历
+
+
+
+
+
+
+
+
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
