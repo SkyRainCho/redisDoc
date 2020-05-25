@@ -113,6 +113,119 @@ typedef struct quicklistEntry
 
 ### 快速链表的创建、释放与初始化
 
+```c
+quicklist *quicklistCreate(void);
+quicklist *quicklistCreateNode(void);
+```
+
+上述两个函数通过调用`zmalloc`函数分别为快速链表以及**链表节点**分配内存空间，同时会为快速链表以及**链表节点**的对应字段设置初始化默认的数值。
+
+
+
+```c
+void quicklistSetCompressDepth(quicklist *quicklist, int compress);
+void quicklistSetFill(quicklist *quicklist, int fill);
+void quicklistSetOpetions(quicklist *quicklist, int fill, int depth);
+```
+
+上述三个函数用于设定了快速链表的*压缩深度*以及*装载因子*。
+
+* *压缩深度*其中必须为非负数，其数值上限被定义为`#define COMPRESS_MAX (1 << 16)`，同时*压缩深度*是可以被定义为0的，这表示，整个快速链表中所有**链表节点**都是处于压缩状态。
+* **装载因子**可以为正数也可以为负数，当**装载因子**为正数时，表示**链表节点**中的压缩链表里存储**数据节点**的个数上限，其上限被定义为`#define FILL_MAX (1 << 15)`，因为在*压缩链表*之中，其不需要遍历便可以获取的数据长度数值上限为`2^16-2`，因此这个**装载因子**的数值上限不可以过大，否则在处理快速链表的时候会导致性能的问题；当**装载因子**为负数时，表示**链表节点**中的压缩链表所占用的内存大小，**装载因子**最低可以为`-5`，对应了5档内存的限制，定义在*src/quicklist.c*文件中：
+  * `-1`，4096字节
+  * `-2`，8192字节
+  * `-3`，16384字节
+  * `-4`，32768字节
+  * `-5`，65536字节
+
+而函数`quicklistSetOpetions`会一次性调用`quicklistSetCompressDepth`和`quicklistSetFill`来同时设定*快速链表*的*压缩深度*和*装载因子*。
+
+
+
+```c
+void quicklistRelease(quicklist *quicklist);
+```
+
+这个函数用于释放一个给定的*快速链表*，
+
+```c
+void quicklistRelease(quicklist *quicklist)
+{
+    ...
+    len = quicklist->len;
+    while (len--)
+    {
+        next = current->next;
+        zfree(current->zl);
+        ...
+        zfree(current);
+        ...
+        cirrent = next;
+    }
+    zfree(quicklist);
+}
+```
+
+这个释放过程是通过循环释放*快速链表*中的每一个**链表节点**的*压缩链表*以及**链表节点**自身，最后在释放整个*快速链表*实现的。
+
+### 快速链表节点的压缩与解压
+
+对于外部调用者来说，并不需要关系**链表节点**的压缩与解压一类的操作，因此这一组操作都是定义在*src/quicklist.c*源文件中的静态函数。
+
+#### 节点的压缩
+
+```c
+REDIS_STATIC int __quicklistCommpressNode(quicklistNode *node)
+{
+    if (node->sz > MIN_COMPRESS_BYTES)
+    	return 0;
+    quicklistLZF *lzf = zmalloc(sizeof(*lzf) + node->sz);
+    if (((lzf->sz = lzf_compress(node->zl, node->sz, lzf->compressed,node->sz)) == 0) 
+        || lzf->sz + MIN_COMPRESS_IMPROVE >= node->sz)
+    {
+  		zfree(lzf);
+        return 0;
+    }
+    ...
+    node->zl = (unsigned char *)lzf;
+	...
+    return 1;
+}
+```
+
+上述这个函数是快速链表中**链表节点**压缩的基础，这里需要注意两个问题
+
+1. 如果当前**链表节点**的压缩链表占用的内存大小小于`#define MIN_COMPRESS_BYTES 48`这里定义的48个字节时，便没有必要进行压缩。
+2. 如果经过压缩后，数据的内存反而大于未压缩的数据，那么也没有必要进行压缩。
+
+如果压缩失败，这个函数会返回0；如果压缩成功，那么在更新这个**链表节点**的相关字段之后，函数会返回1。
+
+```c
+#define quicklistCompressNode(_node)										\
+	do {																	\
+		if ((_node) && (_node)->encoding == QUICKLIST_NODE_ENCODING_RAW) {	\
+			__quicklistCompressNode((_node));								\
+		}																	\
+	} while (0)
+```
+
+上面这个宏定义`quicklistCompressNode`通过调用`__quicklistCompressNode`尝试对一个**链表节点**进行压缩，在压缩前会检查被压缩的节点的`quicklistNode.encoding`字段是`QUICKLIST_NODE_ENCODING_RAW`编码。在后续的代码中，尝试对**链表节点**进行压缩，都会通过调用这个宏定义来实现。
+
+#### 节点的解压
+
+```c
+REDIS_STATIC int __quicklistDecompressNode(quicklistNode *node);
+#define quicklistDecompressNode(_node)
+```
+
+上面这个函数是快速链表中对**链表节点**进行解压别的基础，通过调用`lzf_decompress`来对将压缩数据解压成原始的压缩链表，同时更新`quicklistNode.encoding`字段。
+
+而宏定义`quicklistDecompressNode`会通过调用`__quicklistDecompressNode`
+
+
+
+
+
 ### 快速链表节点的插入
 
 ### 快速链表节点的删除
