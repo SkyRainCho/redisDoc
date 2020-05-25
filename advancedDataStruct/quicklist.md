@@ -1,6 +1,6 @@
 # Redis中快速连链表的实现
 
-根据前文的分析，我了解到，基于经典双端链表的一些缺点，双端链表已经不在作为*LIST*对象的底层实现了。但是作为*LIST*的底层实现之一，压缩链表同样具有一定的劣势。压缩链表由于使用的是有一段连续的内存，这就意味着，执行插入操作导致内存大小发生变化时，便会引起一次内存的重新分配过程，同时还会执行一定量的数据移动。特别时对于压缩链表较长的情况下，大批量的数据移动势必会降低系统的性能。而在上述这个方面恰恰就是经典双端链表的优势，故此*Redis*设计实现了一种快速链表的数据结构，兼具经典双端链表与压缩链表的特点，实现了时间与空间上的一种折中。
+根据前文的分析，我了解到，基于经典双端链表的一些缺点，双端链表已经不在作为*LIST*对象的底层实现了。但是作为*LIST*的底层实现之一，压缩链表同样具有一定的劣势。压缩链表由于使用的是有一段连续的内存，这就意味着，执行插入操作导致内存大小发生变化时，便会引起一次内存的重新分配过程，同时还会执行一定量的数据移动。特别时对于压缩链表较长的情况下，大批量的数据移动势必会降低系统的性能。而在上述这个方面恰恰就是经典双端链表的优势，故此*Redis*设计实现了一种快速链表的数据结构，兼具经典双端链表与压缩链表的特点，实现了时间与空间上的一种折衷。
 
 相信了解*STL*的人对上述的描述会有一种似曾相识的感觉。没错，*STL*中的*deque*便是使用上述思想实现的一种既可以在队列两端快速执行插入与删除操作，同时可以根据下标对数据进行随机访问的数据结构。
 
@@ -130,7 +130,7 @@ void quicklistSetOpetions(quicklist *quicklist, int fill, int depth);
 
 上述三个函数用于设定了快速链表的*压缩深度*以及*装载因子*。
 
-* *压缩深度*其中必须为非负数，其数值上限被定义为`#define COMPRESS_MAX (1 << 16)`，同时*压缩深度*是可以被定义为0的，这表示，整个快速链表中所有**链表节点**都是处于压缩状态。
+* *压缩深度*其中必须为非负数，其数值上限被定义为`#define COMPRESS_MAX (1 << 16)`，同时*压缩深度*是可以被定义为0的，这表示，快速链表关闭了压缩功能，这个特性可以通过`#define quicklistAllowsCompression(_ql) ((_ql)->compress != 0)`来判断。
 * **装载因子**可以为正数也可以为负数，当**装载因子**为正数时，表示**链表节点**中的压缩链表里存储**数据节点**的个数上限，其上限被定义为`#define FILL_MAX (1 << 15)`，因为在*压缩链表*之中，其不需要遍历便可以获取的数据长度数值上限为`2^16-2`，因此这个**装载因子**的数值上限不可以过大，否则在处理快速链表的时候会导致性能的问题；当**装载因子**为负数时，表示**链表节点**中的压缩链表所占用的内存大小，**装载因子**最低可以为`-5`，对应了5档内存的限制，定义在*src/quicklist.c*文件中：
   * `-1`，4096字节
   * `-2`，8192字节
@@ -139,8 +139,6 @@ void quicklistSetOpetions(quicklist *quicklist, int fill, int depth);
   * `-5`，65536字节
 
 而函数`quicklistSetOpetions`会一次性调用`quicklistSetCompressDepth`和`quicklistSetFill`来同时设定*快速链表*的*压缩深度*和*装载因子*。
-
-
 
 ```c
 void quicklistRelease(quicklist *quicklist);
@@ -168,9 +166,9 @@ void quicklistRelease(quicklist *quicklist)
 
 这个释放过程是通过循环释放*快速链表*中的每一个**链表节点**的*压缩链表*以及**链表节点**自身，最后在释放整个*快速链表*实现的。
 
-### 快速链表节点的压缩与解压
+### 快速链表的压缩与解压
 
-对于外部调用者来说，并不需要关系**链表节点**的压缩与解压一类的操作，因此这一组操作都是定义在*src/quicklist.c*源文件中的静态函数。
+对于外部调用者来说，真正关系的是*快速链表*的插入与删除等操作，而并不需要关心**链表节点**的压缩与解压一类的操作，因此这一组操作都是定义在*src/quicklist.c*源文件中的静态函数。
 
 #### 节点的压缩
 
@@ -220,17 +218,94 @@ REDIS_STATIC int __quicklistDecompressNode(quicklistNode *node);
 
 上面这个函数是快速链表中对**链表节点**进行解压别的基础，通过调用`lzf_decompress`来对将压缩数据解压成原始的压缩链表，同时更新`quicklistNode.encoding`字段。
 
-而宏定义`quicklistDecompressNode`会通过调用`__quicklistDecompressNode`
+而宏定义`quicklistDecompressNode`与`quicklistCompressNode`类似，会尝试判断`quicklistNode.encoding`这个编码字段，并通过调用`__quicklistDecompressNode`函数，对一个**链表节点**的底层压缩数据进行解压。
 
+#### 链表的压缩与解压
+由于*快速链表*中只有两端的部分**链表节点**是处于未压缩的状态，因此当我们需要操作一个位于*快速链表*中间的**链表节点**时，我们需要对该**链表节点**先调用`quicklistDecompressNode`进行解压，当完成对该节点的操作之后，再调用`quicklistCompressNode`对其进行压缩。如果对**链表节点**的操作在一次函数调用中就可以完成，那么在同一个堆栈中调用解压与压缩函数接口便可以完成相关的操作。但是在一些情况下，调用者无法在对**链表节点**进行解压之后立即对其进行重新压缩，压缩操作需要在另外的地方进行，因此*Redis*在定义压缩**链表节点**数据结构的时候，特意定义了`quicklistNode.recompress`这个字段用于处理上述这种情况，同时也定义了两个宏，用于处理这种无法原地重压缩的情况：
 
+```c
+#define quicklistDecompressNodeForUse(_node)
+#define quicklistRecompressOnly(_ql, _node)
+```
+其中`quicklistDecompressNodeForUse`与`quicklistDecompressNode`的不同点之处在于，会将`quicklistNode.recompress`字段设置为1，表明其是一个临时被解压的**链表节点**，需要在后续的操作中调用`quicklistRecompressOnly`将其重新压缩。
 
+而对于整个*快速链表*的压缩操作，*Redis*定义了一个链表压缩的基础操作：
+```c
+REDIS_STATIC void __quicklistCompress(const quicklist *quicklist, quicklistNode *node);
+```
+这个函数有两个作用：
+1. 根据*快速链表*设定的压缩深度，对链表进行维护，也就是对链表两端的**链表节点**进行解压操作。
+2. 如果传入的`node`节点不为空，那么判断这个节点是否处于压缩深度之内，如果该节点并非是处于链表两端的节点，那么对这个节点执行压缩操作。
 
+### 快速链表的插入
 
-### 快速链表节点的插入
+#### 插入条件的判断
+因为*快速链表*定义了装载因子`quicklist.fill`这个字段，用来对每个**链表节点**底层压缩链表的内存大小或者节点长度进行限制，因此在向某个**链表节点**中插入**数据节点**的时候，需要预先进行判断，新的**数据节点**是否可以进行插入。
 
-### 快速链表节点的删除
+如果*快速链表*的装载因子设置对于压缩链表内存大小的限制，那么*Redis*会通过下面这个函数来检查插入后新的内存大小是否满足装载因子的限制：
+```c
+REDIS_STATIC int _quicklistNodeSizeMeetsOptimizationRequirement(const size_t sz, const int fill);
+```
+这个函数会首先判断`fill`参数是否为负数，因为*快速链表*只有在装载因子为负数的情况下才会对压缩链表内存大小进行限制。如果`fill`参数合法，那么会从`optimization_level`数组中查询对应内存上限，然后判断新的内存大小是否符合要求。
 
-### 快速链表节点的访问
+那么对于插入条件的通用判断，*Redis*则是通过下面这个静态函数来实现的：
+```c
+REDIS_STATIC int _quicklistNodeAllowInsert(const quicklistNode *node, const int fill, const size_t sz);
+```
+给定一个待插入的**链表节点**，以及这个*快速链表*的装载因子和插入数据的内存大小，来判断插入操作是否可以执行，返回0，表示无法插入到给定的**链表节点**；返回1，则表示可以进行插入。整个判断过程分为三步：
+1. 如果装载因子限制了压缩链表的内存的大小，那么通过`_quicklistNodeSizeMeetsOptimizationRequirement`函数检查内存大小是否符合要求。
+2. 如果装载因子限制的是压缩链表的节点长度，那么对于这种情况，*Redis*也会定义其内存大小的限制`#define SIZE_SAFETY_LIMIT 8192`，也就是这种情况下，整个压缩链表的内存大小不能查过8K字节，否则就需要一个单独的**链表节点**来存储数据。
+3. 最后会判断`node`节点中**数据节点**的个数是否满足装载因子对于节点个数的限制。
+
+在操作*快速链表*的过程中，为了提高内存使用率，会尝试对两个相邻的**链表节点**进行合并，这种合并操作也应该符合*快速链表*中装载因子对**链表节点**的限制，因此*Redis*还定义个下面的函数，用于判断两个**链表节点**是否可以合并为1个：
+```c
+REDIS_STATIC int _quicklistNodeAllowMerge(const quicklistNode *a, const quicklistNode *b, const int fill);
+```
+这个函数的判断流程与`_quicklistNodeAllowInsert`类似，也一样会从三个方面进行判断。
+
+#### 链表节点的插入
+*Redis*定义了一个底层的**链表节点**的插入操作函数：
+```c
+REDIS_STATIC void __quicklistInsertNode(quicklist *quicklist, quicklistNode *old_node, quicklistNode *new_node, int after);
+```
+这个函数执行的是一个经典的双端链表插入操作，
+1. 如果`after`为1，那么`new_node`会被插入到`old_node`节点的后面。
+2. 如果`after`为0，那么`new_node`会被插入到`old_node`节点的前面。
+
+此外需要注意的一点，待插入的**链表节点**`new_node`，应该是一个未被压缩的节点，如果被插入到*快速链表*的头部或者尾部的时候，便没有必要对该节点进行压缩，而插入到其他位置的时候，需要调用者在`__quicklistInsertNode`之后，手动调用压缩函数，对节点进行压缩。
+
+通过对`__quicklistInsertNode`进行包装，*Redis*还定义了两个静态函数，用于实现先向某个已存在的**链表节点**前后进行插入新的**链表节点**的操作：
+```c
+REDIS_STATIC void _quicklistInsertNodeBefore(quicklist *quicklist, quicklistNode *old_node, quicklistNode *new_node)
+{
+    __quicklistInsertNode(quicklist, old_node, new_node, 0);
+}
+
+REDIS_STATIC void _quicklistInsertNodeAfter(quicklist *quicklist, quicklistNode *old_node, quicklistNode *new_node) 
+{
+    __quicklistInsertNode(quicklist, old_node, new_node, 1);
+}
+```
+
+#### 数据节点的插入
+*Redis*提供了两个接口函数，用于实现向*快速链表*的头部和尾部插入**数据节点**，这两个函数可以供调用者在外部进行调用：
+```c
+int quicklistPushHead(quicklist *quicklist, void *value, size_t sz);
+int quicklistPushTail(quicklist *quicklist, void *value, size_t sz);
+```
+上述两个函数实现方式基本上是一致的：
+1. 通过调用前面提到的`_quicklistNodeAllowInsert`静态函数来判断，新数据是否可以插入到*快速链表*的头节点或者尾节点。
+2. 如果可以插入，那么调用压缩链表的插入接口`ziplistPush`，将数据插入到头节点或者尾节点的压缩链表中，值得注意的是，因为不论当前的*快速链表*的压缩深度是多少，其头节点和尾节点一定是未压缩的状态，因此执行压缩链表插入的时候，不需要对**链表节点**进行解压缩操作。
+3. 如果头尾节点因为达到了装载因子的限制而无法插入新元素的话，或者当前的*快读链表*为空的时候，那么*Redis*会按照如下的步骤执行插入流程：
+    1. 调用`quicklistCreateNode`创建一个新的**链表节点**。
+    2. 调用压缩链表的插入接口`ziplistPush`，将数据插入到新创建的**链表节点**的底层压缩链表之中。
+    3. 调用`_quicklistInsertNodeBefore`或者`_quicklistInsertNodeAfter`函数，将新创建的**链表节点**插入到快速链表之中。
+
+上述两个函数的插入过程一定不会失败，当新数据被插入到一个已存在的**链表节点**之中，那么该函数会返回0；如果新创建一个**链表节点**，那么函数返回1。
+
+### 快速链表的删除
+
+### 快速链表的访问
 
 ### 快速链表的遍历
 
