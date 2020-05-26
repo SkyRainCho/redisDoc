@@ -233,11 +233,104 @@ REDIS_STATIC int __quicklistDecompressNode(quicklistNode *node);
 ```c
 REDIS_STATIC void __quicklistCompress(const quicklist *quicklist, quicklistNode *node);
 ```
-这个函数有两个作用：
+这个函数有两个用途：
 1. 根据*快速链表*设定的压缩深度，对链表进行维护，也就是对链表两端的**链表节点**进行解压操作。
 2. 如果传入的`node`节点不为空，那么判断这个节点是否处于压缩深度之内，如果该节点并非是处于链表两端的节点，那么对这个节点执行压缩操作。
 
+### 快速链表的访问
+前面我们已经知道*Redis*会使用`quicklistEntry`这个数据结构来表示链表中的一个**数据节点**。因此*Redis*给出了一个接口函数，通过一个给定的索引`index`来获取在*快速链表*中这个索引所对应的**数据节点**的`quicklistEntry`描述：
+```c
+int quicklistIndex(const quicklist *quicklist, const long long index, quicklistEntry *entry)
+{
+    quicklistNode *n;
+    unsigned long long accum = 0;
+    unsigned long long index;
+
+    initEntry(entry);
+    entry->quicklist = quicklist;
+
+    ...
+
+    while (likely(n))
+    {
+        if ((accum + n->count) > index)
+        {
+            break;
+        }
+        else
+        {
+            accum += n->count;
+            n = forward ? n->next : next->prev;
+        }
+    }
+
+    entry=->node = n;
+    if (forward)
+    {
+        entry->offset = index - accum;
+    }
+    else
+    {
+        entry->offset = (-index) - 1 + accum;
+    }
+
+    quicklistDecompressNodeForUse(entry->node);
+    entry->zi = ziplistIndex(entry->node->zl, entry->offset);
+    ziplistGet(entry->zi, &entry->value, &entry->sz, &entry->longval);
+
+    ...
+}
+```
+这个函数传入的`index`的参数，可以是一个从0开始的整数，这表示从*快速链表*的头部开始向后查找定位；可以是从-1开始的负数，这表示从*快速链表*的尾部开始向前查找定位。**数据节点**的定位大致分为5步：
+1. 声明辅助局部变量，
+2. 初始化`quicklistEntry`
+3. 通过，找到**数据节点**所在的**链表节点**
+4. 根据`index`以及`accum`计算出该**数据节点**在**链表节点**之中的偏移
+5. 调用`quicklistDecompressNodeForUse`解压出当前的**链表节点**，然后调用`ziplistIndex`以及`ziplistGet`从**链表节点**的压缩链表中解码出相关数据赋值给`quicklistEntry`。
+
+这也就意味这，调用`quicklistIndex`后，对应的**链表节点**会被临时的解压出来，因此后续需要调用`quicklistCompress`函数尝试对该**链表节点**重新压缩。
+
+
+```c
+int quicklistReplaceAtIndex(quicklist *quicklist, long index, void *data, int sz);
+```
+上述这个函数，会使用`quicklistIndex`函数，将*快速链表*中`index`索引对应的**数据节点**中的数据使用`data`和`sz`进行替换。
+
+### 快速链表的遍历
+
+#### 快速链表迭代器
+```c
+quicklistIter *quicklistGetIterator(const quicklist *quicklist, int direction);
+```
+`quicklistGetIterator`这个函数通过给定迭代器方向`AL_START_HEAD`或者`AL_START_TAIL`，来创建一个指向*快速链表*头部或者尾部的迭代器。
+
+```c
+quicklistIter *quicklistGetIteratorAtIdx(const quicklist *quicklist, const int direction, const long long idx);
+```
+`quicklistGetIteratorAtIdx`这个函数与`quicklistGetIterator`类似，都是用来创建一个*快速链表*的迭代器。但是不同的地方在于，这个函数所返回的迭代器并不是指向*快速链表*的头部或者尾部，而是指向给定索引`idx`对应的**数据节点**的迭代器。
+
+```c
+void quicklistReleaseIterator(quicklistIter *iter);
+```
+而`quicklistReleaseIterator`这个函数的作用是释放一个给定的迭代器`iter`，如果迭代器指向了某一个**链表节点**，那么会调用`quicklistCompress`尝试对该节点进行压缩。
+
+```c
+int quicklistNext(quicklistIter *iter, quicklistEntry *entry);
+```
+该函数用于实现迭代器对*快速链表*的迭代过程，将迭代器`iter`沿迭代方向向后移动，同时将所指向的**数据节点**赋值给`quicklistEntry`，其基本的调用范式为：
+```c
+iter = quicklistGetIterator(quicklist,<direction>);
+quicklistEntry entry;
+while (quicklistNext(iter, &entry)) {
+    if (entry.value)
+        [[ use entry.value with entry.sz ]]
+    else
+        [[ use entry.longval ]]
+}
+```
+
 ### 快速链表的插入
+因为对于调用者来说，**链表节点**这一层对于他其实是透明，调用者主要进行的是**数据节点**的操作，而并不是太关心一个**数据节点**是以何种策略插入到哪个**链表节点**中，或者是从哪个**链表节点**中删除的。因此我们可以发现，在*src/quicklist.h*头文件中定义的通常是对于**数据节点**的操作函数，而对于**链表节点**的操作，则通常是定义在*src/quicklist.c*源文件中的静态函数。
 
 #### 插入条件的判断
 因为*快速链表*定义了装载因子`quicklist.fill`这个字段，用来对每个**链表节点**底层压缩链表的内存大小或者节点长度进行限制，因此在向某个**链表节点**中插入**数据节点**的时候，需要预先进行判断，新的**数据节点**是否可以进行插入。
@@ -346,15 +439,40 @@ quicklist *quicklistCreateFromZiplist(int fill, int compress, unsigned char *zl)
 ### 快速链表的删除
 
 #### 链表节点的删除
+*Redis*为*快速链表*中对于**链表节点**的删除给一个基础的操作函数：
+```c
+REDIS_STATIC void __quicklistDelNode(quicklist *quicklist, quicklistNode *node)
+{
+    ...
+    __quicklistCompress(quicklist, NULL);
+    ...
+}
+```
+此处对**链表节点**的删除，与**链表节点**的插入类似，应用经典的双端链表的删除方式。但是执行删除操作时，如果这个节点刚好处于*快速链表*的压缩深度之内，那么我们需要调用`__quicklistCompress(quicklist, NULL);`来对某一个处于压缩状态，但是因为删除了`node`节点而落入压缩深度范围内的节点进行解压。
 
-因为对于调用者来说
+#### 数据节点的删除
+对于**数据节点**的删除操作，*Redis*同样定义了一个基础的操作函数：
+```c
+REDIS_STATIC int quicklistDelIndex(quicklist *quicklist, quicklistNode *node, unsigned char **p);
+```
+这个函数用于从给定的*快速链表*`quicklist`中，删除**链表节点**`node`里由`p`所指向的**数据节点**，这里有两点需要注意：
+1. 因为这是一个内部调用的静态函数，因此需要在调用的外部，自行对`node`节点进行解压。
+2. 如果`node`节点底层的压缩链表在调用`ziplistDelete`删除`p`之后，变成空的压缩链表，那么需要调用`__quicklistDelNode`将这个**链表节点**从链表中删去。
 
-### 快速链表的访问
-
-### 快速链表的遍历
 
 
+### 快速链表的其他操作
+```c
+void quicklistRotate(quicklist *quicklist);
+```
 
+```c
+quicklist *quicklistDup(quicklist *orig);
+```
+
+```c
+int quicklistCompare(unsigned char *p1, unsigned char *p2, int p2_len);
+```
 
 
 
