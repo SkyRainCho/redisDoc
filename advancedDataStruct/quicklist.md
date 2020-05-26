@@ -289,6 +289,7 @@ REDIS_STATIC void _quicklistInsertNodeAfter(quicklist *quicklist, quicklistNode 
 
 #### 数据节点的插入
 *Redis*提供了两个接口函数，用于实现向*快速链表*的头部和尾部插入**数据节点**，这两个函数可以供调用者在外部进行调用：
+
 ```c
 int quicklistPushHead(quicklist *quicklist, void *value, size_t sz);
 int quicklistPushTail(quicklist *quicklist, void *value, size_t sz);
@@ -303,7 +304,50 @@ int quicklistPushTail(quicklist *quicklist, void *value, size_t sz);
 
 上述两个函数的插入过程一定不会失败，当新数据被插入到一个已存在的**链表节点**之中，那么该函数会返回0；如果新创建一个**链表节点**，那么函数返回1。
 
+同时*Redis*还将上述的两个函数包装成一个通用的函数接口：
+
+```c
+void quicklistPush(quicklist *quicklist, void *value, const size_t sz, int where);
+```
+
+通过将参数`where`设置成`QUICKLIST_HEAD`或者`QUICKLIST_TAIL`来实现向*快速链表*的头部或者尾部进行**数据节点**的插入。
+
+#### 数据节点的批量插入
+
+*Redis*为*快速链表*提供了三个函数，可以实现从一个压缩链表构造 一个*快速链表*，或者将压缩链表作为输入数据的集合，实现批量的**数据节点**插入。
+
+```c
+void quicklistAppendZiplist(quicklist *quicklist, unsigned char *zl);
+```
+
+这个函数通过给定的压缩链表参数`zl`创建一个**快速节点**，然后调用`_quicklistInsertNodeAfter`将这个新建的**链表节点**插入到*快速链表*的节点。
+
+
+
+```c
+quicklist *quicklistAppendValuesFromZiplist(quicklist *quicklist, unsigned char *zl);
+```
+
+这个函数也是将一个压缩链表`zl`中的数据插入到*快速链表*中，但是与`quicklistAppendZiplist`不同的是，`quicklistAppendValuesFromZiplist`不是将压缩链表作为一个整体插入到*快速链表*中的，而是遍历读取压缩链表中中的每一个节点，将其作为**数据节点**的输入，通过调用`quicklistPushTail`将**数据节点**插入到*快速链表*的尾部。
+
+
+
+```c
+quicklist *quicklistCreateFromZiplist(int fill, int compress, unsigned char *zl)
+{
+    return quicklistAppendValuesFromZiplist(quicklistNew(fill, compress), zl);
+}
+```
+
+上述这个函数是通过压缩链表来创建一个*快速链表*，具体是通过函数`quicklistNew`创建一个*快速链表*，然后调用`quicklistAppendValuesFromZiplist`函数将压缩链表中的数据批量的插入到新创建的*快速链表*中。
+
+
+
 ### 快速链表的删除
+
+#### 链表节点的删除
+
+因为对于调用者来说
 
 ### 快速链表的访问
 
