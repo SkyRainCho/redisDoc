@@ -1,4 +1,4 @@
-# Redis中快速连链表的实现
+# Redis中快速链表的实现
 
 根据前文的分析，我了解到，基于经典双端链表的一些缺点，双端链表已经不在作为*LIST*对象的底层实现了。但是作为*LIST*的底层实现之一，压缩链表同样具有一定的劣势。压缩链表由于使用的是有一段连续的内存，这就意味着，执行插入操作导致内存大小发生变化时，便会引起一次内存的重新分配过程，同时还会执行一定量的数据移动。特别时对于压缩链表较长的情况下，大批量的数据移动势必会降低系统的性能。而在上述这个方面恰恰就是经典双端链表的优势，故此*Redis*设计实现了一种快速链表的数据结构，兼具经典双端链表与压缩链表的特点，实现了时间与空间上的一种折衷。
 
@@ -304,15 +304,21 @@ quicklistIter *quicklistGetIterator(const quicklist *quicklist, int direction);
 ```
 `quicklistGetIterator`这个函数通过给定迭代器方向`AL_START_HEAD`或者`AL_START_TAIL`，来创建一个指向*快速链表*头部或者尾部的迭代器。
 
+
+
 ```c
 quicklistIter *quicklistGetIteratorAtIdx(const quicklist *quicklist, const int direction, const long long idx);
 ```
 `quicklistGetIteratorAtIdx`这个函数与`quicklistGetIterator`类似，都是用来创建一个*快速链表*的迭代器。但是不同的地方在于，这个函数所返回的迭代器并不是指向*快速链表*的头部或者尾部，而是指向给定索引`idx`对应的**数据节点**的迭代器。
 
+
+
 ```c
 void quicklistReleaseIterator(quicklistIter *iter);
 ```
 而`quicklistReleaseIterator`这个函数的作用是释放一个给定的迭代器`iter`，如果迭代器指向了某一个**链表节点**，那么会调用`quicklistCompress`尝试对该节点进行压缩。
+
+
 
 ```c
 int quicklistNext(quicklistIter *iter, quicklistEntry *entry);
@@ -329,7 +335,12 @@ while (quicklistNext(iter, &entry)) {
 }
 ```
 
+这个函数在对迭代器进行迭代的时候，会根据迭代器的方向，选择调用`ziplistNext`或者`ziplistPrev`来对**链表节点**的底层压缩链表进行迭代，将迭代器底层指向**数据节点**的指针`quicklistIter.zi`沿着迭代器方向进行移动。如果`quicklistIter.zi`已经处于压缩链表的两端，那么在进行压缩链表迭代时，将会导致指针失效，对于这种情况，那么将迭代器所在的**链表节点**指针`quicklistIter.current`沿着迭代器方向移动到下一个**链表节点**，然后递归调用`quicklistNext`函数继续对迭代器进行迭代。
+
+对于`quicklistNext`这个函数，需要注意的是，调用者在迭代器迭代过程中禁止执行对*快速链表*的插入操作，这样的操作可能会导致迭代器失效。但是*Redis*允许在迭代的过程中应用`quicklistDelEntry`函数来执行删除操作，对于这个函数的讲解会在后续进行介绍。
+
 ### 快速链表的插入
+
 因为对于调用者来说，**链表节点**这一层对于他其实是透明，调用者主要进行的是**数据节点**的操作，而并不是太关心一个**数据节点**是以何种策略插入到哪个**链表节点**中，或者是从哪个**链表节点**中删除的。因此我们可以发现，在*src/quicklist.h*头文件中定义的通常是对于**数据节点**的操作函数，而对于**链表节点**的操作，则通常是定义在*src/quicklist.c*源文件中的静态函数。
 
 #### 插入条件的判断
@@ -380,7 +391,38 @@ REDIS_STATIC void _quicklistInsertNodeAfter(quicklist *quicklist, quicklistNode 
 }
 ```
 
+#### 链表节点的拆分与合并
+
+*Redis*会使用静态函数`_quicklistZiplistMerge`来作为合并**链表节点**的操作基础，该函数会给定两个**链表节点**`a`和`b`，然后尝试将合并这两个**链表节点**的底层压缩链表。
+
+```c
+REDIS_STATIC quicklistNode *_quicklistZiplistMerge(quicklist *quicklist, quicklistNode *a, quicklistNode *b)
+{
+    ...
+	quicklistDecompressNode(a);
+    quicklistDecompressNode(b);
+    if ((ziplistMerge(&a->zl, &b->zl))) {
+    	quicklistNode *keep = NULL, *nokeep = NULL;
+        ...
+        __quicklistDelNode(quicklist, nokeep);
+        quicklistCompress(quicklist, keep);
+        return keep;
+    }
+    ...
+}
+```
+
+这个合并操作的流程为：
+
+1. 调用`quicklistDecompressNode`将两个**链表节点**进行解压。
+2. 通过`ziplistMerge`合并两个**链表节点**的底层压缩链表。
+3. 调用`__quicklistDelNode`将被合掉的**链表节点**从*快速链表*之中删除。
+4. 最后将保留的节点通过`quicklistCompress`进行重新压缩。
+
+
+
 #### 数据节点的插入
+
 *Redis*提供了两个接口函数，用于实现向*快速链表*的头部和尾部插入**数据节点**，这两个函数可以供调用者在外部进行调用：
 
 ```c
@@ -473,7 +515,6 @@ quicklist *quicklistDup(quicklist *orig);
 ```c
 int quicklistCompare(unsigned char *p1, unsigned char *p2, int p2_len);
 ```
-
 
 
 
