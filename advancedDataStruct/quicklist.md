@@ -555,6 +555,7 @@ REDIS_STATIC int quicklistDelIndex(quicklist *quicklist, quicklistNode *node, un
 void quicklistDelEntry(quicklistIter *iter, quicklistEntry *entry) {
     ...
     int deleted_node = quicklistDelIndex((quicklist *)entry->quicklist, entry->node, &entry->zi);
+    iter->zi = NULL;
     ...
 }
 ```
@@ -570,9 +571,52 @@ while (quicklistNext(iter, &entry))
 }
 ```
 
+那么*Redis*是如何保证迭代器在一边迭代一边删除的时候，不会失效的呢？我们可以在回头看一下`quicklistNext`函数的实现细节：
+
+```c
+int quicklistNext(quicklistIter *iter, quicklistEntry *entry)
+{
+    ...
+    if (!iter->zi)
+    {
+        quicklistDecompressNodeForUse(iter->current);
+        iter->zi = ziplistIndex(iter->current->zl, iter->offset);
+    }
+}
+```
+
+我们可以看到，*Redis*在执行`quicklistDelEntry`对**数据节点**进行删除操作后，会将`quicklistIter.zi`字段设置为`NULL`，
+
+* 如果**链表节点**没有被删除的话，那么`quicklistIter.offset`不会变化，在下一轮迭代`quicklistNext`中，如果发现`quicklistIter.zi`为`NULL`的时候，会调用`ziplistIndex`根据`quicklistIter.offset`来将迭代器移动到下一个位置。
+* 如果**链表节点**被删除的话，那么`quicklistDelEntry`会更新迭代器`quicklistIter.current`和`quicklistIter.offset`这两个字段，用于将迭代器移动到下一个**链表节点**，最后在`quicklistNext`调用中，会将迭代器移动到下一个位置。
+
+
+
 #### 数据节点的Pop删除
 
+*Redis*除了提供若干个在指定位置执行删除**数据节点**的函数之外，还提供了两个更加定制化的，用于从链表两端执行删除操作的函数。
+
+```c
+int quicklistPopCustom(quicklist *quicklist, int where, unsigned char **data, unsigned int *sz, long long *sval, void *(*saver)(unsigned char *data, unsigned int sz))；
+```
+
+这个函数是*快速链表*的*Pop*操作的基础，会从`quicklist`中弹出元素，将弹出的**数据节点**的数据通过函数指针`saver`存储在`data`之中，如果**数据节点**中的数据是一个整形数的话，那么会将数据存储在`sval`之中。如果弹出成功，函数返回1，否则的话，函数返回0。
+
+除了上述这个基础*Pop*函数之外，*Redis*还基于这个函数，定义了一个默认的*Pop*函数：
+
+```c
+int quicklistPop(quicklist *quicklist, int where, unsigned char **data, unsigned int *sz, long long *slong);
+```
+
+这个函数本质上是对`quicklistPopCustom`的简单封装，但是这个函数只在测试代码中有调用，而在外部则没有对应调用的地方。
+
 #### 数据节点的批量删除
+
+```c
+int quicklistDelRange(quicklist *quicklist, const long start, const long count);
+```
+
+这个函数会从*快速链表*中删除从`start`开始连续`count`个数的**数据节点**，需要注意的是，被删除的多个**数据节点**有可能会跨越多个**链表节点**。
 
 
 ### 快速链表的其他操作
@@ -580,15 +624,23 @@ while (quicklistNext(iter, &entry))
 void quicklistRotate(quicklist *quicklist);
 ```
 
+`quicklistRotate`用于实现对*快速链表*的一次反转操作，也就是将*快速链表*尾部的**数据节点**弹出，然后插入到*快速链表*的头部。
+
+
+
 ```c
 quicklist *quicklistDup(quicklist *orig);
 ```
+
+这个函数则用于拷贝一个给定的*快速链表* ，并返回新建的*快速链表的指针*。
+
+
 
 ```c
 int quicklistCompare(unsigned char *p1, unsigned char *p2, int p2_len);
 ```
 
-
+这个函数t通过调用`ziplistCompare`来判断一个底层**数据节点**的数据是否等于`p2`和`p2_len`所表示的数据。
 
 
 
