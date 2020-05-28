@@ -419,9 +419,32 @@ REDIS_STATIC quicklistNode *_quicklistZiplistMerge(quicklist *quicklist, quickli
 3. 调用`__quicklistDelNode`将被合掉的**链表节点**从*快速链表*之中删除。
 4. 最后将保留的节点通过`quicklistCompress`进行重新压缩。
 
+不过我们发现，前面我们介绍了`_quicklistNodeAllowMerge`这个函数用于检查两个**链表节点**的合并是否可以满足装载因子的限制。但是`_quicklistZiplistMerge`这个函数看起来只是执行了**链表节点**的合并操作，而并没有对合并的合法性进行校验。因此*Redis*在`_quicklistZiplistMerge`的基础上，结合了合并合法性的校验函数`_quicklistNodeAllowMerge`实现了另外一个更加*高级*的**链表节点**合并操作的接口：
+```c
+REDIS_STATIC void _quicklistMergeNodes(quicklist *quicklist, quicklistNode *center);
+```
+这个函数会尝试对`center`节点以及其两侧各两个**链表节点**一共五个节点尝试合并成一个**链表节点**，其合并的顺序为：
+1. `center->prev->prev`与`center->prev`
+2. `center->next`与`center->next->next`
+3. `center->prev`与`center`
+4. `center`与`center->next`
 
+上述的四步合并都是通过先调用`_quicklistNodeAllowMerge`检查合法性，然后调用`_quicklistZiplistMerge`将两个节点进行合并。
 
-#### 数据节点的插入
+在实现了**链表节点**的合并操作之后，*Redis*也为我们提供了一个**链表节点**的拆分功能，这个特性在执行**数据节点**的插入时，是非常有用的。想象一个场景：
+1. 当我们期望在一个给定的索引位置进行**数据节点**插入，
+2. 而这个给定的索引恰恰对于**链表节点**底层压缩链表的中间，
+3. 同时这次插入的结果会导致对应的**链表节点**将不满足*快速链表*对于装载因子的限制
+
+对于这种情况，便需要对对应的**链表节点**执行拆分操作，将一个较大的节点拆分成两个更小的节点，以满足**数据节点**的插入。因此*Redis*定义了一个静态函数用于实现**链表节点**的拆分：
+```c
+REDIS_STATIC quicklistNode *_quicklistSplitNode(quicklistNode *node, int offset, int after);
+```
+这个函数会根据`offset`以及`after`来确定**链表节点**中低层压缩链表的拆分位置。如果拆分成功，那么这个函数会返回一个新的**链表节点**，其中保存了被拆分出来的**数据节点**，而剩下的**数据节点**则会被保留在`node`节点之中。对于**链表节点**的拆分策略，如下所示：
+1. 如果`after`为1，原`node`节点中保留了`[0, offset]`这些**数据节点**，返回的新节点存储了`[offset+1, END]`这些**数据节点**。
+2. 如果`after`为0，原`node`节点中保留了`[offset+1, END]`这些**数据节点**，返回的新节点存储了`[0, offset]`这些**数据节点**。
+
+#### 数据节点的Push插入
 
 *Redis*提供了两个接口函数，用于实现向*快速链表*的头部和尾部插入**数据节点**，这两个函数可以供调用者在外部进行调用：
 
@@ -447,6 +470,38 @@ void quicklistPush(quicklist *quicklist, void *value, const size_t sz, int where
 
 通过将参数`where`设置成`QUICKLIST_HEAD`或者`QUICKLIST_TAIL`来实现向*快速链表*的头部或者尾部进行**数据节点**的插入。
 
+#### 数据节点的随机插入
+前面介绍的**数据节点**在*快速链表*两端的**Push**插入操作是*快速链表*中较为常用的操作，因为是在链表的两端执行插入，因此不需要考虑**链表节点**的合并与拆分的细节，通过前面的描述，我们也发现当在链表两端执行插入操作时，如果两端的**链表节点**不能满足装载因子的限制，那么*Redis*会直接为新数据创建一个新的**链表节点**，将之插入到*快速链表*中。
+但是对于将**数据节点**插入到指定位置索引的需求依然存在，因此*Redis*定义了一个向*快速链表*中的给定位置索引插入一个**数据节点**的函数：
+```c
+REDIS_STATIC void _quicklistInsert(quicklist *quicklist, quicklistEntry *entry, void *value, const size_t sz, int after);
+```
+这个函数向*快速链表*`quicklist`中的**数据节点**`entry`的前面或者后面根据`value`以及`sz`插入一个新的**数据节点**。在插入过程，*Redis*会执行如下的逻辑：
+1. 定义了五个标记变量：
+    |标记变量|变量含义|
+    |-------|--------|
+    |`full`|`entry`对应的**链表节点**是否已经达到装载因子的限制|
+    |`at_tail`|新数据的插入位置是否位于`entry`对应**链表节点**底层压缩链表的尾部|
+    |`at_head`|新数据的插入位置是否位于`entry`对应**链表节点**底层压缩链表的头部|
+    |`full_next`|`entry`对应的**链表节点**的前序节点是否已满|
+    |`full_prev`|`entry`对应的**链表节点**的后序节点是否已满|
+
+2. 通过判断`quicklistEntry.offset`以及调用`_quicklistNodeAllowInsert`函数来为上述的5个标记赋值。
+3. 根据前面定义的5个标记以及`after`参数，将插入过程划分为6种情况，根据情况的不同，执行不同的插入逻辑：
+    * `!full && after`，插入到给定**数据节点**之后，对应的**链表节点**未满，那么直接调用`ziplistPush`或者`ziplistInsert`将新数据插入到当前**链表节点**的底层压缩链表中。
+    * `!full && !after`，插入到给定**数据节点**之前，对应的**链表节点**未满，那么处理方式与上面一种情况类似，调用`ziplistInsert`将新数据插入到当前**链表节点**的底层压缩链表中。
+    * `full && at_tail && node->next && !full_next && after`，插入对应**链表节点**的尾部，同时该节点已满，而其后序的**链表节点**未满，那么将新数据插入到其后续**链表节点**压缩链表的头部。
+    * `full && at_head && node->prev && !full_prev && !after`，插入对应**链表节点**的头部，同时该节点已满，而其前序的**链表节点**未满，那么将数据插入到其前序**链表节点**压缩链表的尾部。
+    * `full && ((at_tail && node->next && full_next && after) || (at_head && node->prev && full_prev && !after))`，在对应**链表节点**的头部或者尾部插入新的数据，但是该节点已满无法插入新数据，同时对应的前序或者后续节点也无法插入新数据，对于这种所有关联**链表节点**都无法进行插入的情况，只能为这个新的数据创建一个新的**链表节点**，调用`__quicklistInsertNode`将其插入到*快速链表*中。
+    * 最后一种情况，插入的位置正好是对应**数据节点**的中间位置，而该节点已满，那么将调用`_quicklistSplitNode`函数，通过`quicklistEntry.offset`，以及`after`作为参数，将**链表节点**进行拆分，对拆分操作返回的新**链表节点**应用`ziplistPush`将数据插入其中，并将新**链表节点**插入*快速链表*，最后调用`_quicklistMergeNodes`尝试对**链表节点**进行合并。
+
+基于这个`_quicklistInsert`函数，*Redis*定义了两个接口函数：
+```c
+void quicklistInsertBefore(quicklist *quicklist, quicklistEntry *entry, void *value, const size_t sz);
+void quicklistInsertAfter(quicklist *quicklist, quicklistEntry *entry, void *value, const size_t sz);
+```
+这两个函数本质上是对`_quicklistInsert`简单的封装，分别用于将数据插入到一个给定的**数据节点**之前，或者插入到给定的**数据节点**之后。
+
 #### 数据节点的批量插入
 
 *Redis*为*快速链表*提供了三个函数，可以实现从一个压缩链表构造 一个*快速链表*，或者将压缩链表作为输入数据的集合，实现批量的**数据节点**插入。
@@ -457,15 +512,11 @@ void quicklistAppendZiplist(quicklist *quicklist, unsigned char *zl);
 
 这个函数通过给定的压缩链表参数`zl`创建一个**快速节点**，然后调用`_quicklistInsertNodeAfter`将这个新建的**链表节点**插入到*快速链表*的节点。
 
-
-
 ```c
 quicklist *quicklistAppendValuesFromZiplist(quicklist *quicklist, unsigned char *zl);
 ```
 
 这个函数也是将一个压缩链表`zl`中的数据插入到*快速链表*中，但是与`quicklistAppendZiplist`不同的是，`quicklistAppendValuesFromZiplist`不是将压缩链表作为一个整体插入到*快速链表*中的，而是遍历读取压缩链表中中的每一个节点，将其作为**数据节点**的输入，通过调用`quicklistPushTail`将**数据节点**插入到*快速链表*的尾部。
-
-
 
 ```c
 quicklist *quicklistCreateFromZiplist(int fill, int compress, unsigned char *zl)
@@ -475,8 +526,6 @@ quicklist *quicklistCreateFromZiplist(int fill, int compress, unsigned char *zl)
 ```
 
 上述这个函数是通过压缩链表来创建一个*快速链表*，具体是通过函数`quicklistNew`创建一个*快速链表*，然后调用`quicklistAppendValuesFromZiplist`函数将压缩链表中的数据批量的插入到新创建的*快速链表*中。
-
-
 
 ### 快速链表的删除
 
@@ -492,7 +541,7 @@ REDIS_STATIC void __quicklistDelNode(quicklist *quicklist, quicklistNode *node)
 ```
 此处对**链表节点**的删除，与**链表节点**的插入类似，应用经典的双端链表的删除方式。但是执行删除操作时，如果这个节点刚好处于*快速链表*的压缩深度之内，那么我们需要调用`__quicklistCompress(quicklist, NULL);`来对某一个处于压缩状态，但是因为删除了`node`节点而落入压缩深度范围内的节点进行解压。
 
-#### 数据节点的删除
+#### 指定数据节点的删除
 对于**数据节点**的删除操作，*Redis*同样定义了一个基础的操作函数：
 ```c
 REDIS_STATIC int quicklistDelIndex(quicklist *quicklist, quicklistNode *node, unsigned char **p);
@@ -501,6 +550,29 @@ REDIS_STATIC int quicklistDelIndex(quicklist *quicklist, quicklistNode *node, un
 1. 因为这是一个内部调用的静态函数，因此需要在调用的外部，自行对`node`节点进行解压。
 2. 如果`node`节点底层的压缩链表在调用`ziplistDelete`删除`p`之后，变成空的压缩链表，那么需要调用`__quicklistDelNode`将这个**链表节点**从链表中删去。
 
+基于上面的静态函数，*Redis*定义了一个用户节点函数，用于从*快速链表*中删除一个由`quicklistEntry`描述的数据节点：
+```c
+void quicklistDelEntry(quicklistIter *iter, quicklistEntry *entry) {
+    ...
+    int deleted_node = quicklistDelIndex((quicklist *)entry->quicklist, entry->node, &entry->zi);
+    ...
+}
+```
+对于链表而言，除了在链表两端执行的**Pop**删除之外，其他对给定**数据节点**的删除大概率都是在遍历的过程中进行，因此`quicklistDelEntry`这个函数除了接受一个`quicklistEntry`变量作为参数之后，选择使用一个`quicklistIter`迭代器作为参数，而不是传入一个*快速链表*指针作为参数的。其常用的遍历删除范式为：
+```c
+while (quicklistNext(iter, &entry))
+{
+    if (quicklistCompare(entry.zi, data, size))
+    {
+        quicklistDelEntry(iter, &entry);
+    }
+    i++
+}
+```
+
+#### 数据节点的Pop删除
+
+#### 数据节点的批量删除
 
 
 ### 快速链表的其他操作
