@@ -9,5 +9,17 @@
 
 ## 高级数据类型
 
-* [压缩链表](advanceDataStruc/ziplist.md)
-* [快速链表](adavancedDataStruct/quicklist.md)
+* [压缩链表](advancedDataStruct/ziplist.md)
+* [压缩字典](advancedDataStruct/zipmap.md)
+* [整数集合](advancedDataStruct/intset.md)
+* [紧凑链表](advancedDataStruct/listpack.md)
+* [快速链表](advancedDataStruct/quicklist.md)
+* [基数树](advancedDataStruct/rax.md)
+
+## 对象类型
+* [Redis对象](dataStruct/object.md)
+* [字符串对象](dataStruct/string.md)
+* [列表对象](dataStruct/list.md)
+* [集合对象](dataStruct/set.md)
+* [有序集合对象](dataStruct/zset.md)
+* [散列对象](dataStruct/hash.md)
