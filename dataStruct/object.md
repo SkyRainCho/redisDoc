@@ -42,15 +42,61 @@ typedef struct redisObject {
 
 `redisObject.lru`这个字段用于处理对象过期的相关逻辑，可以使用**LRU**策略来处理过期逻辑，也可以使用**LFU**策略来处理过期逻辑。关于对象过期的内容，会在后面专门进行讲理，这一部分将着重讲解*Redis*对象的内容。
 
-### 对象创建
+### 对象创建与释放：
 
 ```c
 robj *createObject(int type, void *ptr);
 ```
 
-用于根据给定的`type`创建一个*Redis*对象。
+用于根据给定的`type`通过调用`zmalloc`分配内存，创建一个*Redis*对象，并对*Redis*对象的字段进行初始化，默认*Redis*对象的编码方式`robj.encoding`都是采用原始方式进行编码，并将引用计数`robj.refcount`设置为1，同时还会根据系统的淘汰策略，为`robj.lru`设置初始值。
+
+`createObject`是创建*Redis*对象的基础函数，*Redis*同时提供了一组创建不同类型*Redis*对象的默认接口函数：
+
+| 对象类型         | 编码类型                 | 函数接口                              |
+| ---------------- | ------------------------ | ------------------------------------- |
+| 列表数据类型     | `OBJ_ENCODING_QUICKLIST` | `robj *createQuicklistObject(void)`   |
+| 列表数据类型     | `OBJ_ENCODING_ZIPLIST`   | `robj *createZiplistObject(void)`     |
+| 集合数据类型     | `OBJ_ENCODING_HT`        | `robj *createSetObject(void)`         |
+| 集合数据类型     | `OBJ_ENCODING_INTSET`    | `robj *createIntsetObject(void)`      |
+| 散列数据类型     | `OBJ_ENCODING_ZIPLIST`   | `robj *createHashObject(void)`        |
+| 有序集合数据类型 | `OBJ_ENCODING_SKIPLIST`  | `robj *createZsetObject(void)`        |
+| 有序集合数据类型 | `OBJ_ENCODING_ZIPLIST`   | `robj *createZsetZiplistObject(void)` |
+| Stream数据类型   | `OBJ_ENCODING_STREAM`    | `robj *createStreamObject(void)`      |
+| Module数据类型   | `OBJ_ENCODING_RAW`       | `robj *createModuleObject(void)`      |
+
+通过上面这张表格我们可以了解到不同对象数据其底层所使用的数据类型，不过需要注意的是，对于散列类型，默认使用的是压缩链表作为底层实现，但是在一定条件下，会转化为由`dict`数据结构作为底层实现的形式。而这张表中缺失了字符串数据类型的内容，对于字符串数据类型，会在后续单独做专门讲解。
+
+同时*Redis*还提供了一组对应的用于释放对象的操作接口：
+
+```c
+void freeStringObject(robj *o);
+void freeListObject(robj *o);
+void freeSetObject(robj *o);
+void freeZsetObject(robj *o);
+void freeHashObject(robj *o);
+void freeModuleObject(robj *o);
+void freeStreamObject(robj *o);
+```
+
+最后，*Redis*还为对象提供了一个类型检查接口：
+
+```c
+int checkType(client *c, robj *o, int type)
+{
+  if (o->type != type)
+  {
+    addReply(c.shared.wrongtypeerr);
+    return 1;
+  }
+  return 0;
+}
+```
+
+上面这个函数主要的应用场景在于，当*Redis*客户端针对某一个*key*执行某些命令时，需要判断这个*key*对应的*value*对象的类型，是否符合命令对应的类型，如果对一个列表数据执行字符串命令显然是不合适的，因此这个函数函数主要用于执行客户端命令前对数据类型进行校验。
 
 ### 对象共享
+
+*Redis*为对象的共享引用提供了几个操作接口：
 
 ```c
 robj *makeObjectShared(robj *o);
@@ -59,6 +105,39 @@ void decrRefCount(robj *o);
 void decrRefCountVoid(void *o);
 robj *resetRefCount(robj *obj);
 ```
+
+1. `makeObjectShared`用于将对象的引用计数`robj.refcount`设置为一个特定的标记数值`OBJ_SHARED_REFCOUNT`，这个数值在*Redis*中被定义为`#define OBJ_SHARED_REFCOUNT INT_MAX`，也就是被定义为`INT_MAX`。这个函数用于在*Redis*启动时，初始化一些较小的整形数对象作为共享对象，这些对象将在*Redis*整个生命期中一直存在，当其他现场引用这些对象的时候，不需要增加引用计数，当然解绑对象时，也不会减少其引用计数的数量：
+   
+    ```c
+    void createSharedObjects(void) {
+      	...
+        for (j = 0; j < OBJ_SHARED_INTEGERS; j++) {
+            shared.integers[j] = makeObjectShared(createObject(OBJ_STRING,(void*)(long)j));
+            shared.integers[j]->encoding = OBJ_ENCODING_INT;
+        }
+    ...
+    }
+    ```
+    
+2. `increRefCount`这个函数用于对对象的引用计数`robj.refcount`执行加一操作，这个操作的前提是`robj.refcount`被没有被设置为`OBJ_SHARED_REFCOUNT`。
+
+3. `decrRefCount`这个函数用于对对象的引用计数`robj.refcount`执行减一操作，如果当前的引用计数已经为1，那么执行这个函数会根据对象的类型来调用对应释放函数，来释放对象；如果当前的引用计数没有被设置为`OBJ_SHARED_REFCOUNT`，那么会对引用计数执行减一的操作。
+
+4. `decrRefCountVoid`这个函数实际上是`decrRefCount`函数的一个变形形式，它是接受`void*`作为参数，而不是使用`robj*`作为参数。
+
+5. `resetRefCount`这个函数用于重置对象的引用计数，将`robj.refcount`字段重置为0。通过调用这个函数，我们可以不用释放对象，就可以将其引用计数设置为0。有些函数自身就会增加对象的引用计数，但是如果我们要将一个新的对象（此时引用计数已经为 1）参数该函数时，使用`resetRefCount`就很有用了：
+
+   ```c
+   obj = createObject(...);
+   functionThatWillIncrementRefCount(obj);
+   decrRefCount(obj)
+   ```
+
+   如果应用`resetRefCount`这函数，上面的调用就可以简化为下面的形式：
+
+   ```c
+   functionThatWillIncrementRefCount(resetRefCount(CreateObject(...)));
+   ``` 
 
 ### 长度计算
 
