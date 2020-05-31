@@ -137,7 +137,7 @@ robj *resetRefCount(robj *obj);
 
    ```c
    functionThatWillIncrementRefCount(resetRefCount(CreateObject(...)));
-   ``` 
+   ```
 
 ### 长度计算
 
@@ -145,7 +145,64 @@ robj *resetRefCount(robj *obj);
 size_t objectComputeSize(robj *o, size_t sample_size);
 ```
 
-### OBJECT与MEMORY命令
+`objectComputeSize`这个函数用于计算*Redis*对象在内存中所占用的字节数，不过这个返回的字节数是一个近似值，尤其是对于聚合数据类型，当给定了采样大小`sample_size`的时候。`objectComputeSize`函数会根据不同的对象类型，以不同的方式来计算对象占用内存的大小，下面截取计算列表数据类型内存占用的代码段，可以了解其具体的实现细节：
+
+```c
+size_t objectComputeSize(robj *o, size_t sample_size) {
+  ...
+  if (o->type == OBJ_LIST) {
+    if (o->encoding == OBJ_ENCODING_QUICKLIST) {
+      quicklist *ql = o->ptr;
+      quicklistNode *node = ql-head;
+      do {
+        elesize += sizeof(quicklistNode)+ziplistBlobLen(node=>zl);
+        samples++;
+      } while ((node = node->next) && samples < sample_size);
+      asize += (double)elesize/samples*ql->len;
+    }
+    else if (o->encoding == OBJ_ENCODING_ZIPLIST) {
+      asize = sizeof(*o)+ziplistBlobLen(o->ptr);
+    }
+    else {
+      serverPanic("Unknown list encoding");
+    }
+  }
+  ...
+}
+```
+
+
+
+### OBJECT命令
+
+`OBJECT`命令可以用来查看*Redis*对象内部的细节，按照*Redis*官方文档给出的描述是：
+
+> The [OBJECT](https://redis.io/commands/object) command allows to inspect the internals of Redis Objects associated with keys. It is useful for debugging or to understand if your keys are using the specially encoded data types to save space. Your application may also use the information reported by the [OBJECT](https://redis.io/commands/object) command to implement application level key eviction policies when using Redis as a Cache.
+
+也就是说，`OBJECT`用于检查或者了解你的keys是否用到了特殊编码 的数据类型来存储空间。 当*Redis*作为缓存使用的时候，你的应用也可能用到这些由`OBJECT`命令提供的信息来决定应用层的key的驱逐策略。
+
+应用这个`OBJECT`这个命令，可以通过子命令查看对象的引用计数（`refcount`），编码方式（`encoding`），空闲时间（`idletime`）或者使用频次（`freq`）等信息，其基本的操作流程是：
+
+1. 根据命令参数对应的*Key*查找到对应的*Redis*对象。
+2. 再根据子命令的不同，获取*Redis*对象的不同字段用以返回。
+
+```c
+void objectCommand(client *c)
+{
+  ...
+  if (!strcasecmp(c->argv[1]->ptr, "refcount") && c->argc == 3)
+  {
+    if ((o == objecCommandLookupOrReply(c, c->argv[2].shared.nullbulk)) == NULL)
+    {
+      return;
+    }
+    addReplyLongLong(c,o->refcount);
+  }
+  ...
+}
+```
+
+上面这段代码以查看引用计数子命令为例，展示了`OBJECT`命令的实现方式。
 
 `redisObject`在*Redis*内部被广泛使用，但是为了避免间接访问所带来的的额外开销，最近在很多地方，*Redis*使用没有被包装在`redisObject`中的单纯的动态*String*来表示数据。
 
