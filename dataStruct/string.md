@@ -124,7 +124,28 @@ robj *tryObjectEncoding(robj *o);
 ```
 而`tryObjectEncoding`这个函数则是应用一组规则尝试对一个字符串对象的内存进行优化：其基本的逻辑为：
 ```flow
-
+begin=>start: 开始
+end=>end: 结束
+isInt=>condition: 是否是整数型字符串对象
+isShared=>condition: 是否是共享对象
+can2l=>condition: 是否可以解码成整数
+getVal=>operation: string2l
+canShared=>condition: 是否对应共享数字对象
+getShared=>operation: shared.integers[value];
+lenTooSmall=>condition: 长度是否小于EMBSTR阈值
+createEmb=>operation: createEmbeddedStringObject
+trim=>operation: trimStringObjectIfNeeded
+begin->isInt
+isInt(no)->isShared
+isInt(yes)->end
+isShared(yes)->end
+isShared(no)->can2l
+can2l(no)->lenTooSmall
+lenTooSmall(yes)->createEmb->end
+lenTooSmall(no)->trim->end
+can2l(yes)->getVal->canShared
+canShared(yes)->getShared->end
+canShared(no)->end
 ```
 
 #### 字符串对象的其他操作
@@ -178,10 +199,43 @@ void psetexCommand(client *c);
 2. 通过`setKey`函数，将*key-value*写入内存数据库。
 3. 如果设置了过期时间，那么通过`setExpire`将过期时间设置给对应的*key*。
 
+### MSET命令的实现
+这一系列命令有**MSET**以及**MSETNX**两个命令，用于批量地为一组*keys*设定它们的*values*，这系列命令具有原子性，也就是说所有的*key*是一次性被设置的，因此对于客户端来说，不会存在一部分*key*被设置了，而另外一部分的数据没有被设置的情况。当需要批量地对某些*key*进行设置的时候，应该选择使用这个**MSET**命令，这比客户端循环地执行**SET**命令效率更高。**MSET**命令与**MSENX**命令的区别在于，**MSETNX**命令所涉及的*key*不能是已存在的*key*。
+
+这两个命令的格式为：
+* **MSET**，`MSET key value [key value ...]`
+* **MSETNX**，`MSETNX key value [key value ...]`
+
+```c
+void msetGenericCommand(client *c, int nx);
+void msetCommand(client *c);
+void msetnxCommand(client *c);
+```
+上述的三个函数用于实现*Redis*的批量设置命令，通过`msetGenericCommand`这个基础操作，我们可以了解命令具体的实现逻辑：
+```c
+void msetGenericCommand(client *c, int nx) {
+	//如果设置了nx选项，那么在执行set之前，需要先验证所有的key都不存在
+	if (nx) {
+		for (j = 1; j < c->argc; j += 2) {
+			if (lookupKeyWrite(c->db, c->argv[j]) != NULL) {
+				return;
+			}
+		}
+	}
+	//通过for循环对所有的key进行设置操作
+	for (j = 1; j < c->argc; j += 2) {
+		setKey(c->db, c->argv[j], c->argv[j + 1]);
+	}
+}
+```
+
 ### GET命令的实现
+*Redis*对于**GET**命令的描述为：
+> Get the value of key. If the key does not exits the special value nil is returned. An error is rerturned if the value stored at key is not a string, because GET only handles string values.
 
+这个命令用于返回给定*key*对应的*value*，需要注意的是这个命令只能获取到字符串对象类型的*value*。
 
-这个命令用于返回给定*key*对应的*value*，需要注意的是这个命令只能获取到字符串对象类型的*value*，其命令格式为：`GET key`。
+命令格式为：`GET key`
 ```c
 int getGenericCommand(client *c);
 void getCommand(client *c);
@@ -190,36 +244,87 @@ void getCommand(client *c);
 1. 通过`lookupKeyReadOrReply`查找给定的*key*是否存在与内存数据库中。
 2. 如果找到，通过`robj.type`验证给定*key*对应的*value*是否是字符串对象类型。
 
-### GETSET命令的实现
+### MGET命令的实现
+**MGET**命令用于获取一组给定的*key*所对应的*value*，这个命令只对字符串数据类型生效，对于每个不存在的*key*或者不是字符串类型的*value*，都会返回特殊的`nil`值。
 
-**GETSET**这个命令用于从*Redis*中查找给定*key*对应的*value*，
+这个命令的格式：`MGET key [key ...]`
+
+```c
+void mgetCommand(client *c);
+```
+`mgetCommand`函数的实现，可以结合**GET**命令以及**MSET**命令一起进行理解。
+
+### GETSET命令的实现
+*Redis*对于**GETSET**命令的描述为：
+
+> Atomically sets key to value and returns the old value stored at key. Returns an error when key exists but does not hold a atring value.
+
+**GETSET**这个命令用于自动将*key*对应到*value*并且返回原来*key*对应的*value*。如果*key*存在但是对应的*value*不是字符串，就返回错误。
+
 ```c
 void getsetCommand(client *c);
 ```
+*Redis*使用上面这个`getsetCommand`函数来实现**GETSET**命令，这个函数首先会调用`getGenericCommand`函数，相当于执行一次**GET**指令，将这个*key*对应的*value*返回给客户端，最后在调用`setKey`函数为*key*设定新的*value*值。
 
 ### SETRANGE命令的实现
+**SETRANGE**命令用于覆盖*key*所对应的字符串从给定的*offset*开始的一部分内容。如果修改成功，那么这个命令会返回修改后的字符串对象的长度。如果*offset*比当前*key*对应的字符串还要长的话，那么会在这个字符串对象后面追加0以达到*offset*的长度。如果给定的*key*不存在的话，那么相当于执行一次**SET**命令操作，为这个*key*设定了*value*。当然这个命令会限定修改后的数据不能超过*Redis*对字符串数据对象512MB字节的限制。
+
+这个命令的格式为：`SETRANGE key offset value`
 ```c
 void setrangeCommand(client *c);
 ```
 
+*Redis*使用`setrangeCommand`这个函数来实现**SETRANGE**这个命令，这个函数的逻辑可以用下面的流程图来表示：
+
+```flow
+begin=>start: 开始
+lookup=>operation: lookupKeyWrite
+checkobj=>condition: key是否存在
+checklen1=>operation: checkStringLength
+checklen1Res=>condition: 长度是否满足
+checktype=>operation: checkType
+checktypeRes=>condition: 类型是否为字符串
+checklen2=>operation: checkStringLength
+checklen2Res=>condition: 长度是否满足
+unshareobj=>operation: dbUnshareStringValue
+createobj=>operation: createObject
+addkey=>operation: dbAdd
+descript=>operation: 开始设置value
+memcpy=>operation: 通过memcpy将value拷贝到对象中
+end=>end: 结束
+begin->lookup->checkobj
+checkobj(no)->checklen1->checklen1Res
+checklen1Res(no)->end
+checklen1Res(yes)->createobj->addkey->descript
+checkobj(yes)->checktype->checktypeRes
+checktypeRes(no)->end
+checktypeRes(yes)->checklen2->checklen2Res
+checklen2Res(no)->end
+checklen2Res(yes)->unshareobj->descript
+descript->memcpy->end
+```
+
+
+
 ### GETRANGE命令的实现
+
+命令的格式为：`GETRANGE key start end`
+
+**GETRANGE**命令用于获取一个*key*所对应的字符串的子串，这个子串是由*start*以及*end*来决定的，*start*以及*end*参数都可以使用负数来实现从后先前地截取子串。
 ```c
 void getrangeCommand(client *c);
 ```
 
-### MSET命令的实现
-```c
-void msetGenericCommand(client *c, int nx);
-void msetCommand(client *c);
-void msetnxCommand(client *c);
-```
-
-### MGET命令的实现
-```c
-void mgetCommand(client *c);
-```
-
 ### INCR和DECR命令的实现
+*Redis*为数值型字符串对象提供了一组操作，可以允许客户端以原子操作的方式对一个数值型字符串对象增加某个数值，或者减去某个数值，如果这个*key*在内存数据库之中不存在，那么会为这个*key*创建一个值为0的数据，然后在执行后续的加减操作：
+|命令|描述|格式|
+|----|----|----|
+|**INCR**|对存储在指定*key*的数值执行原子的加1操作|`INCR key`|
+|**DECR**|对存储在指定*key*的数值执行原子的减1操作|`INCRBY key increment`|
+|**INCRBY**|对存储在指定*key*的数值执行原子的加上给定数值的操作|`DECR key`|
+|**DERBY**|对存储在指定*key*的数值执行原子的减去给定数值的操作|`DECRBY key decrement`|
+|**INCRBYFLOAT**|对存储在指定*key*的数值执行原子的加上给定浮点数值的操作|`INCRBYFLOAT key increment`|
+
 ```c
 void incrDecrCommand(client *c, long long incr);
 void incrCommand(client *c);
@@ -228,16 +333,62 @@ void incrbyCommand(client *c);
 void decrbyCommand(client *c);
 void incrbyfloatCommand(client *c);
 ```
+在*Redis*实现上述五个命令的代码中，`incrDecrCommand`是四个整数加减基础实现逻辑，`incrbyfloatCommand`则是浮点数加减操作的基础逻辑，二者存在一些差异，但是本质上的逻辑是大致相同的，那么以`incrDecrCommand`为例，其具体实现为：
+```c
+void incrDecrCommand(client *c, long long incr) 
+{
+	...
+	//根据给定的key，搜索对应的value对象o，此处可以查找不到
+	o = lookupKeyWrite(c->db, c->argv[1]);
+	//如果查找到o，那么检查对象是否是字符串对象
+	if (o != NULL && checkType(c, o, OBJ_STRING)) return;
+	//从对象o中解码出对应的数值，存储在value变量中，如果对象o为空，那么value会被赋值0
+	if (getLongLongFromObjectOrReply(c, o, &value, NULL) != C_OK) return;
+	...
+	value += incr;
+
+	if (o && o->refcount == 1 && o->encoding == OBJ_ENCODING_INT &&
+		(value < 0 || value >= OBJ_SHARED_INTEGERS) && value >= LONG_MIN &&
+		value <= LONG_MAX) {
+		/* 如果对象o存在，并且没有被其他对象共享，同时在long长度的表示范围内，
+		 * 那么直接将新的数值存储在robj.ptr的指针位上
+		 */
+		new = o;
+		o->ptr = (void *)((long)value);
+	} else {
+		//不满足上面的情况，则需要位这个新的数值创建一个新的字符串对象
+		new = createStringObjectFromLongLongForValue(value);
+		if (o) {
+			dbOverwrite(c->db, c->argv[1], new);
+		} else {
+			dbAdd(c->db, c->argv[1], new);
+		}
+	}
+	...
+}
+```
 
 ### APPEND命令的实现
+**APPEND**命令格式为：`APPEND key value`
+
+这个命令用于将*value*的内容追加到给定*key*存储的内容之后。这个追加操作只对字符串类型的数据有效，如果给定的*key*不存在，那么会将*key*以及*value*作为新的数据存储在内存数据库中；如果*key*存在，那么还需要检查追加数据之后，是否会超过*Redis*对字符串对象512MB的长度限制。
 ```c
 void appendCommand(client *c);
 ```
+上面这个函数便是**APPEND**命令的具体实现，其逻辑可以用如下的流程图表示：
+```flow
+
+```
+这里有一点需要注意，一个*Redis*对象有可能被多个地方共享引用，为了防止追加的操作对其他数据产生影响，这里执行了`dbUnshareStringValue`尝试对数据解除共享，这里相当于一个*CopyOnWrite*的策略。
 
 ### STRLEN命令的实现
+**STRLEN**命令格式为：`STRLEN key`
+
+这个命令用于获取给定*key*所存储的字符串类型*value*的长度。
 ```c
 void strlenCommand(client *c);
 ```
+函数`strlenCommand`用于实现这个**STRLEN**命令，该命令首先会在内存数据库中调用`lookupKeyReadOrReply`来查找给定的*key*，然后在调用`checkType`验证对应的*value*是否为字符串类型数据，最后通过`stringObjectLen`函数获取字符串对象长度。
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
