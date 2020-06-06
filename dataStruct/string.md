@@ -123,36 +123,21 @@ void trimStringObjectIfNeeded(robj *o)
 robj *tryObjectEncoding(robj *o);
 ```
 而`tryObjectEncoding`这个函数则是应用一组规则尝试对一个字符串对象的内存进行优化：其基本的逻辑为：
-```flow
-begin=>start: 开始
-end=>end: 结束
-isInt=>condition: 是否是整数型字符串对象
-isShared=>condition: 是否是共享对象
-can2l=>condition: 是否可以解码成整数
-getVal=>operation: string2l
-canShared=>condition: 是否对应共享数字对象
-getShared=>operation: shared.integers[value];
-lenTooSmall=>condition: 长度是否小于EMBSTR阈值
-createEmb=>operation: createEmbeddedStringObject
-trim=>operation: trimStringObjectIfNeeded
-begin->isInt
-isInt(no)->isShared
-isInt(yes)->end
-isShared(yes)->end
-isShared(no)->can2l
-can2l(no)->lenTooSmall
-lenTooSmall(yes)->createEmb->end
-lenTooSmall(no)->trim->end
-can2l(yes)->getVal->canShared
-canShared(yes)->getShared->end
-canShared(no)->end
-```
+1. 只有`OBJ_ENCODING_RAW`编码以及`OBJ_ENCODING_EMBSTR`编码的字符串才有优化内存空间的必要，这一点可以通过调用`sdsEncodedObject`函数来进行验证。
+2. 对于共享对象的内存优化是不安全的，因为这个对象可能在整个*Redis*的内存空间的各个地方被引用，甚至有可能在其他地方正在处理中。对象是否被共享，可以通过`robj.refcount`字段来进行判断。
+3. 检查该字符串是否可以表示一个长整形数，可以通过`len <= 20 && string2l(s, len, &value)`这个条件进行判断：
+	1. 如果解析出来整数处于*Redis*的共享整数对象`shared.integers`范围内，那么直接返回系统共享对象。
+	2. 如果解析出的整数数值不在共享整数对象：
+		1. 如果`robj.encoding`为`OBJ_ENCODING_RAW`，则释放底层`sds`数据，将整数保存在`robj.ptr`指针上。
+		2. 如果`robj.encoding`为`OBJ_ENCODING_EMBSTR`，那么这种情况则需要释放整个对象，然后调用`createStringObjectFromLongLongForValue`来创建一个新的`OBJ_ENCODING_INT`编码的字符串对象。
+4. 如果没法编码成`OBJ_ENCODING_INT`对象，则会检查`sds`数据的长度，如果小于`OBJ_ENCODING_EMBSTR_SIZE_LIMIT`，那么通过`createEmbeddedStringObject`函数将对象转化为`OBJ_ENCODING_EMBSTR`对象。
+5. 最后通过`trimStringObjectIfNeeded`函数，尝试对底层`sds`数据所分配的内存进行进一步的优化。
 
 #### 字符串对象的其他操作
 ```c
 robj *getDecodedObject(robj *o);
 ```
-`getDecodeObject`这个函数会返回一个新的对象，如果原始对象是一个字符串类型对象，那么会增加其引用计数，并将这个原始对象返回；当原始对象是一个整数型对象时，则会将这个整数转化为一个字符串形式，然后为其创建一个字符串类型的新对象。
+`getDecodeObject`这个函数只对字符串对象生效，会从传入参数所对应的对象返回一个新的对象，如果原始对象是一个字符串类型对象，那么会增加其引用计数，并将这个原始对象返回；当原始对象是一个整数型对象时，则会将这个整数转化为一个字符串形式，然后为其创建一个字符串类型的新对象。
 
 ```c
 robj *dupStringObject(const robj *o);
@@ -274,36 +259,17 @@ void getsetCommand(client *c);
 void setrangeCommand(client *c);
 ```
 
-*Redis*使用`setrangeCommand`这个函数来实现**SETRANGE**这个命令，这个函数的逻辑可以用下面的流程图来表示：
-
-```flow
-begin=>start: 开始
-lookup=>operation: lookupKeyWrite
-checkobj=>condition: key是否存在
-checklen1=>operation: checkStringLength
-checklen1Res=>condition: 长度是否满足
-checktype=>operation: checkType
-checktypeRes=>condition: 类型是否为字符串
-checklen2=>operation: checkStringLength
-checklen2Res=>condition: 长度是否满足
-unshareobj=>operation: dbUnshareStringValue
-createobj=>operation: createObject
-addkey=>operation: dbAdd
-descript=>operation: 开始设置value
-memcpy=>operation: 通过memcpy将value拷贝到对象中
-end=>end: 结束
-begin->lookup->checkobj
-checkobj(no)->checklen1->checklen1Res
-checklen1Res(no)->end
-checklen1Res(yes)->createobj->addkey->descript
-checkobj(yes)->checktype->checktypeRes
-checktypeRes(no)->end
-checktypeRes(yes)->checklen2->checklen2Res
-checklen2Res(no)->end
-checklen2Res(yes)->unshareobj->descript
-descript->memcpy->end
-```
-
+*Redis*使用`setrangeCommand`这个函数来实现**SETRANGE**这个命令，这个函数的逻辑可以用下面的逻辑来简述：
+1. 调用`lookupKeyWrite`函数来查找*key*所对应的对象
+2. 如果对象不存在的话，那么会尝试创建一个新的字符串对象，其对象长度为`offset+sdslen(value)`
+	1. *Redis*会通过调用`checkStringLength`来检查长度有没有超过512MB字节的限制。
+	2. 如果长度合法，那么会通过`createObject`创建一个长度为`offset+sdslen(value)`的字符串对象，并调用`dbAdd`将其加入内存数据库之中。
+3. 如果对象存在的话:
+	1. 由于**SETRANGE**只对字符串对象有效，因此需要调用`checkType`来检查这个已经存在的对象是否是字符串对象。
+	2. 同样也会通过`checkStringLength`来检查长度是否超过限制。
+	3. 调用`dbUnshareStringValue`函数，如果这个已存在的对象是一个共享对象，那么将其从共享中解绑，基于*CopyOnWrite*原则，创建一个对象的拷贝。
+4. 通过上面2、3步之后，现在一定存在一个对应的字符串对象，会调用`sdsgrowzero`尝试对`sds`数据进行扩展。
+5. 通过`memcpy`来将数据拷贝到`sds`数据之中。
 
 
 ### GETRANGE命令的实现
@@ -375,11 +341,7 @@ void incrDecrCommand(client *c, long long incr)
 ```c
 void appendCommand(client *c);
 ```
-上面这个函数便是**APPEND**命令的具体实现，其逻辑可以用如下的流程图表示：
-```flow
-
-```
-这里有一点需要注意，一个*Redis*对象有可能被多个地方共享引用，为了防止追加的操作对其他数据产生影响，这里执行了`dbUnshareStringValue`尝试对数据解除共享，这里相当于一个*CopyOnWrite*的策略。
+上面这个函数便是**APPEND**命令的具体实现，从本质上来说，这个追加操作可以看作是一种特殊的**SETRANGE**命令，相当于`offset`是字符串对象的长度，因此可以通过`setrangeCommand`来了解这个追加命令的实现细节。
 
 ### STRLEN命令的实现
 **STRLEN**命令格式为：`STRLEN key`
