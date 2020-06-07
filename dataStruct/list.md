@@ -27,7 +27,14 @@ typedef struct {
 	quicklistEntry entry; /* Entry in quicklist */
 } listTypeEntry;
 ```
-上述两个数据结构可以被认为是对应快速链表中的`quicklistIter`和`quicklistEntry`这两个数据结构，分别是列表对象的迭代器以及在遍历中用于表示列表对象中的数据节点。
+上述两个数据结构可以被认为是对应快速链表中的`quicklistIter`和`quicklistEntry`这两个数据结构，分别是列表对象的迭代器以及在遍历中用于表示列表对象中的数据节点，这其中各个字段的意义为：
+
+1. `listTypeIterator.subject`，这个对象指针用于标记当前的迭代器属于哪个列表对象。
+2. `listTypeIterator.encoding`，这个字段用于标记其所使用的对象编码类型。
+3. `listTypeIterator.direction`，这个字段用于标记迭代器遍历的方向，对于迭代器的方向，*Redis*给出了两个定义：
+   1. `#define LIST_HEAD 0`
+   2. `#define LIST_TAIL 1`
+4. `listTypeIterator.iter`，这个字段用于表示底层快速链表所对应的迭代器。
 
 还有一点需要注意的是，*Redis*中的列表对象只能用于以链表的形式存储一组字符串对象，*Redis*不支持嵌套的列表对象，也就是说在*Redis*之中，无法创建一个存储列表对象的列表对象。
 
@@ -69,13 +76,23 @@ void listTypeReleaseIterator(listTypeIterator *li);
 int listTypeNext(listTypeIterator *li, listTypeEntry *entry);
 ```
 
+对于列表对象迭代器的初始化是通过`listTypeInitIterator`这个函数来实现的，这个函数会创建一个`listTypeIterator`对象，并通过调用快速链表的`quicklistGetIteratorAtIdx`函数获取到底层快速链表的迭代器，并将其赋值给`listTypeIterator.iter`字段。
+
+因为迭代器也是使用`zmalloc`函数创建的，因此当一个列表对象迭代器不在使用的时候，需要调用`listTypeReleaseIterator`函数将其释放。
+
+最后*Redis*会通过`listTypeNext`函数，实现列表对象迭代器的迭代过程，这个函数内部通过调用`quicklistNext`函数将迭代器当前指向的数据节点存储在给定的`listTypeEntry`之中，同时对迭代器进行迭代，将其指向下一个元素。
+
 ### 列表对象的插入与删除
+
 ```c
 void listTypeInsert(listTypeEntry *entry, robj *value, int where);
 void listTypeDelete(listTypeIterator *iter, listTypeEntry *entry);
 ```
 
+上述两个函数都是通过调用快速链表的相关接口来实现对列表对象的插入与删除操作做。具体是通过`quicklistInsertAfter`以及`quicklistInsertBefore`来实现`listTypeInsert`；使用`quicklistDelEntry`来实现`listTypeDelete`。
+
 ### 列表对象其他操作
+
 ```c
 unsigned long listTypeLength(const robj *subject);
 robj *listTypeGet(listTypeEntry *entry);
@@ -91,6 +108,14 @@ void listTypeConvert(robj *subject, int enc);
 ## 列表对象命令
 ### 列表对象的PUSH系列命令
 #### PUSH命令
+
+*Redis*对于列表对象提供了**LPUSH**命令以及**RPUSH**命令，用于将给定的值插入到存储于*key*中的列表头部或者尾部，如果*key*不存在，那么在进行**PUSH**命令时，会创建一个空列表。这两个命令的格式为：
+
+- **LPUSH**，`LPUSH key value [value ...]`
+- **RPUSH**，`RPUSH key value [value ...]`
+
+我们可以看到，这两个命令都可以向列表对象中插入多个值，当插入多个值的时候，不论是**LPUSH**还是**RPUSH**命令，值的插入顺序等价于按照*value*的次序，多次执行**PUSH**命令的插入效果。
+
 ```c
 void pushGenericCommand(client *c, int where);
 void lpushCommand(client *c);
@@ -98,6 +123,14 @@ void rpushCommand(client *c);
 ```
 
 #### PUSHX命令
+
+同时*Reids*还提供了**LPUSHX**命令与**RPUSHX**命令，这两个命令与上面的**LPUSH**命令与**RPUSH**命令的区别在于，**LPUSHX**与**RPUSHX**命令要求*key*所对应的列表对象必须存在于*Redis*的内存数据库之中，同时这两个命令只能一次插入一个值，无法进行数据的批量插入。
+
+这两个命令的格式为：
+
+- **LPUSHX**，`RPUSHX key value`
+- **RPUSHX**，`RPUSHX key value`
+
 ```c
 void pushxGenericCommand(client *c, int where);
 void lpushxCommand(client *c);
@@ -105,12 +138,27 @@ void rpushxCommand(client *c);
 ```
 
 #### LINSERT命令
+
+除了上述可以在列表两端执行插入数据的命令之外，*Redis*还提供了一个可以在给定位置执行插入的命令**LINSERT**，这个命令的格式为：
+
+`LINSERT key BEFORE|AFTER pivot value`
+
+应用这个命令，可以把*value*插入存储于*key*的列表中在基准值*pivot*的前面或者后面，如果执行成功，命令会返回执行插入操作后的列表对象的长度。
+
 ```c
 void linsertCommand(client *c);
 ```
 
 ### 列表对象的POP系列命令
 #### POP命令
+
+对于基础的弹出操作，*Redis*提供了两个命令，分别会从列表对象的头部或者尾部删除一个元素，这两个命令的格式为：
+
+1. **LPOP**，`LPOP key`
+2. **RPOP**，`RPOP key`
+
+执行上述两个命令，如果成功，会返回被弹出的元素，而当列表对象为空的时候，弹出失败，则会返回空值。
+
 ```c
 void popGenericCommand(client *c, int where);
 void lpopCommand(client *c);
@@ -118,12 +166,30 @@ void rpopCommand(client *c);
 ```
 
 ### 列表对象的RPOPLPUSH系列命令
+
+出了上面针对单一列表对象的操作之外，*Redis*还提供正对两个列表对象的操作命令**RPOPLPUSH**，这个命令的格式为：
+
+`RPOPLPUSH source destination`
+
+应用这个命令，可以原子性地将存储在*source*中的列表对象的尾部元素弹出，并将其插入到存储在*destination*的列表对象之中，当命令执行成功后，会返回这个被移动的元素。
+
 ```c
 void rpoplpushHandlePush(client *c, robj *dstkey, robj *dstobj, robj *value);
 void rpoplpushCommand(client *c);
 ```
 
 ### 列表对象的阻塞POP系列命令
+
+前面提到的**LPOP**命令，**RPOP**命令，**RPOPLPUSH**命令都是属于非阻塞的命令，也就是如果列表对象非空，那么命令会执行相应的操作；而当对象为空的时候，命令会直接返回空值，表示当前的命令执行失败。
+
+相应地，*Redis*为上述的三个命令提供了阻塞的版本，也就是说当列表对象中非空的情况下，其行为与非阻塞版本一致；如果列表对象为空的时候，那么会阻塞客户端，直到列表中有新的元素被插入，或者等待超时。
+
+这三个命令的阻塞版本的格式为：
+
+1. **BLPOP**，`BLPOP key [key ...] timeout`
+2. **BRPOP**，`BRPOP key [key ...] timeout`
+3. **BRPOPLPUSH**，`BRPOPLPUSH source destination timeout`
+
 ```c
 int serveClientBlockedOnList(client *receiver, robj *key, robj *dstkey, redisDb *db, robj *value, int where);
 void blockingPopGenericCommand(client *c, int where);
@@ -134,17 +200,42 @@ void brpoplpushCommand(client *c);
 
 ### 列表对象的删除系列命令
 #### LTRIM命令
+
+**LTRIM**命令用于修建一个已存在的列表对象，这个命令的格式为：
+
+`LTRIM key start stop`
+
+应用这个命令，可以使列表对象只保留由*start*到*end*这个闭区间的数据。
+
 ```c
 void ltrimCommand(client *c);
 ```
 
 #### LREM命令
+
+*Redis*提供了**LREM**命令，这个命令的格式为：
+
+`LREM key count value`
+
+用于从存储在*key*中的列表对象里，删除前*count*次出现的值为*value*的元素。其中对于*count*参数的数值有三种情况：
+
+1. 当*count*为正数的时候，从列表对象的头部往尾部进行删除。
+2. 当*count*为负数的时候，从列表对象的尾部向头部进行删除。
+3. 当*count*为0的时候，会删除列表对象中的所有值为*value*的元素。
+
 ```c
 void lremCommand(client *c);
 ```
 
 ### 列表对象的RANGE命令
 #### LRANGE命令
+
+*Redis*中还提供了返回存储在*key*的列表对象里指定范围内元素的命令**LRANGE**，这个命令的格式为：
+
+`LRANGE key start stop`
+
+*start*与*end*是表示范围的偏移量，可以是基于0的非负数；同时也可以是从-1开始负数，用来表示从列表对象的尾部开始计数。这里需要注意的一点是，基于*start*以及*end*标记的范围是一个闭区间，也就是如果执行`LRANGE list 0 10`的话，那么会返回11个元素，而不是10个。
+
 ```c
 void lrangeCommand(client *c);
 ```
