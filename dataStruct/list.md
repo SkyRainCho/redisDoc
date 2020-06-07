@@ -122,6 +122,10 @@ void lpushCommand(client *c);
 void rpushCommand(client *c);
 ```
 
+上面定义的三个函数是*Redis*用于实现**PUSH**系列命令的函数，`pushGenericCommand`是这三个单数的基础，另外两个函数是在`pushGenericCommand`基础上进行的简单封装。
+
+`pushGenericCommand`这个函数首先会调用`lookupKeyWrite`从*Redis*的内存数据库之中查找到给定*key*所对应的列表对象。如果列表不存在，那么会创建一个空的列表，通过`dbAdd`将其加入到*Redis*的内存数据库中，最后在循环调用前面我们讲解过的`listTypePush`函数，将参数中的一个或者多个*value*压入列表对象之中。
+
 #### PUSHX命令
 
 同时*Reids*还提供了**LPUSHX**命令与**RPUSHX**命令，这两个命令与上面的**LPUSH**命令与**RPUSH**命令的区别在于，**LPUSHX**与**RPUSHX**命令要求*key*所对应的列表对象必须存在于*Redis*的内存数据库之中，同时这两个命令只能一次插入一个值，无法进行数据的批量插入。
@@ -137,6 +141,8 @@ void lpushxCommand(client *c);
 void rpushxCommand(client *c);
 ```
 
+上面者三个函数是*Redis*用于实现**PUSHX**系列命令，其本质上与上面的**PUSH**类似，唯一的区别是在查找*key*所对应的列表对象的时候，会使用`lookupKeyOrReply`函数来查找，如果找不到，将错误信息返回给客户端。
+
 #### LINSERT命令
 
 除了上述可以在列表两端执行插入数据的命令之外，*Redis*还提供了一个可以在给定位置执行插入的命令**LINSERT**，这个命令的格式为：
@@ -146,10 +152,28 @@ void rpushxCommand(client *c);
 应用这个命令，可以把*value*插入存储于*key*的列表中在基准值*pivot*的前面或者后面，如果执行成功，命令会返回执行插入操作后的列表对象的长度。
 
 ```c
-void linsertCommand(client *c);
+void linsertCommand(client *c)
+{
+    ...
+	iter = listTypeInitIterator(subject, 0, LIST_TAIL);
+    while (listTypeNext(iter, &entry))
+    {
+        if (listTypeEqual(&entry, c->argv[3]))
+        {
+            listTypeInsert(&entry, c->argv[4], where);
+            inserted = 1;
+            break;
+        }
+    }
+    listTypeReleaseIterator(iter);
+    ...
+}
 ```
 
+上面这个函数`linsertCommand`是**LINSERT**命令的底层实现，通过上述的代码片段，我们可以了解到，其实现的基础逻辑便在通过列表迭代器对列表对象进行遍历，当找*pivot*的时候，调用`listTypeInsert`函数，将*value*插入到底层快速链表之中。在前面对快速链表的讲解时，曾经提到不能在使用迭代器对快速链表进行遍历的同时执行插入操作，因为这会导致迭代器失效，因此在上面的代码段中，执行插入之后便会从循环之中调用`break`跳出。
+
 ### 列表对象的POP系列命令
+
 #### POP命令
 
 对于基础的弹出操作，*Redis*提供了两个命令，分别会从列表对象的头部或者尾部删除一个元素，这两个命令的格式为：
@@ -164,6 +188,8 @@ void popGenericCommand(client *c, int where);
 void lpopCommand(client *c);
 void rpopCommand(client *c);
 ```
+
+`popGenericCommand`函数是*Redis*实现**POP**系列命令的基础，通过`lookupKeyWriteOrReply`函数来查找*key*所对应的对象，在校验对象为列表对象之后，会调用`listTypePop`函数来实现具体的弹出功能。
 
 ### 列表对象的RPOPLPUSH系列命令
 
@@ -201,7 +227,7 @@ void brpoplpushCommand(client *c);
 ### 列表对象的删除系列命令
 #### LTRIM命令
 
-**LTRIM**命令用于修建一个已存在的列表对象，这个命令的格式为：
+**LTRIM**命令用于修剪一个已存在的列表对象，这个命令的格式为：
 
 `LTRIM key start stop`
 
@@ -210,6 +236,8 @@ void brpoplpushCommand(client *c);
 ```c
 void ltrimCommand(client *c);
 ```
+
+`ltrimCommand`函数用于实现这个修剪命令，通过*start*以及*end*确定保留的索引范围，通过调用两次`quicklistDelRange`函数，将保留部分两侧的数据从底层快速链表中删除。
 
 #### LREM命令
 
@@ -223,11 +251,45 @@ void ltrimCommand(client *c);
 2. 当*count*为负数的时候，从列表对象的尾部向头部进行删除。
 3. 当*count*为0的时候，会删除列表对象中的所有值为*value*的元素。
 
+下面的这个函数用于实现**LREM**命令，给出的代码片段中包含了一段快速链表一边遍历一边删除的逻辑：
+
 ```c
-void lremCommand(client *c);
+void lremCommand(client *c)
+{
+	...
+    while (listTypeNext(li, &entry))
+    {
+        if (listTypeEqual(&entry, obj))
+        {
+            listTypeDelete(li, &entry);
+            server.dirty++;
+            removed++;
+            if (toremove && removed == toremove) break;
+        }
+    }
+    listTypeReleaseIterator(li);
+    ...
+}
 ```
 
+### 列表对象LINDEX与LSET命令
+
+*Redis*提供了两个命令，可以允许客户端对列表对象按照某个下标索引进行操作，分别是**LINDEX**与**LSET**命令，这两个命令的格式为：
+
+1. **LINDEX**，`LINDEX key index`
+2. **LSET**，`LSET key index value`
+
+上面的两个命令分别用于获取或者设置给定*key*对应的列表对象中的下标为*index*的元素，当*index*超过列表对象的长度时，**LINDEX**命令会返回一个空值，而**LSET**命令则会向客户端返回一个错误。
+
+```c
+void lindexCommand(client *c);
+void lsetCommand(client *c);
+```
+
+上述两个函数是**LINDEX**命令以及**LSET**命令的实现，底层分别通过调用`quicklistIndex`以及`quicklistReplaceAtIndex`函数来实现相关的功能。
+
 ### 列表对象的RANGE命令
+
 #### LRANGE命令
 
 *Redis*中还提供了返回存储在*key*的列表对象里指定范围内元素的命令**LRANGE**，这个命令的格式为：
@@ -236,9 +298,40 @@ void lremCommand(client *c);
 
 *start*与*end*是表示范围的偏移量，可以是基于0的非负数；同时也可以是从-1开始负数，用来表示从列表对象的尾部开始计数。这里需要注意的一点是，基于*start*以及*end*标记的范围是一个闭区间，也就是如果执行`LRANGE list 0 10`的话，那么会返回11个元素，而不是10个。
 
+下面这个函数就是负责具体实现**LRANGE**命令的函数，通过下面的代码片段，我们可以了解到命令的具体实现：
+
 ```c
-void lrangeCommand(client *c);
+void lrangeCommand(client *c)
+{
+    ...
+	if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.emptyarray)) == NULL
+        || checkType(c,o,OBJ_LIST)) return;
+    //处理下标索引
+    ...
+   	rangelen = (end - start) + 1;
+    if (o->encoding == OBJ_ENCODING_QUICKLIST) {
+        listTypeIterator *iter = listTypeInitIterator(o, start, LIST_TAIL);
+        while(rangelen--) {
+            listTypeEntry entry;
+            listTypeNext(iter, &entry);
+            quicklistEntry *qe = &entry.entry;
+            ...
+        }
+        listTypeReleaseIterator(iter);
+    }
+    ...
+}
 ```
+
+### 列表对象的LLEN命令
+
+*Redis*通过**LLEN**命令来获取一个列表对象的长度，这个命令的格式为：`LLEN key`，命令执行成功时，会返回列表对象的长度；当*key*不存在的时候，会被认为是一个空的列表，而返回1；当*key*存储的数据不是一个列表的时候，那么会向客户端返回错误。
+
+```c
+void llenCommand(client *c);
+```
+
+上面这个函数则会通过调用`listTypeLength`来实现**LLEN**命令对列表对象长度的获取。
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
