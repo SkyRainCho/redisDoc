@@ -204,6 +204,8 @@ void rpoplpushHandlePush(client *c, robj *dstkey, robj *dstobj, robj *value);
 void rpoplpushCommand(client *c);
 ```
 
+上述两个函数会在内部调用`listTypePush`以及`listTypePop`函数来实现命令的功能，其本质上与**PUSH**命令以及**POP**命令相似，这里就不做过多赘述。
+
 ### 列表对象的阻塞POP系列命令
 
 前面提到的**LPOP**命令，**RPOP**命令，**RPOPLPUSH**命令都是属于非阻塞的命令，也就是如果列表对象非空，那么命令会执行相应的操作；而当对象为空的时候，命令会直接返回空值，表示当前的命令执行失败。
@@ -224,7 +226,10 @@ void brpopCommand(client *c);
 void brpoplpushCommand(client *c);
 ```
 
+上面的5个函数是*Redis*用于实现阻塞**POP**命令的函数，这里的具体实现细节，会在后续讲解*Redis*的阻塞操作时进行详细介绍。
+
 ### 列表对象的删除系列命令
+
 #### LTRIM命令
 
 **LTRIM**命令用于修剪一个已存在的列表对象，这个命令的格式为：
