@@ -141,12 +141,18 @@ sds hashTypeCurrentObjectNewSds(hashTypeIterator *hi, int what);
 在这四个函数里，`hashTypeCurrentFromZiplist`和`hashTypeCurrentFromHashTable`函数分别对应从`OBJ_ENCODING_ZIPLIST`以及`OBJ_ENCODING_HT`编码的散列对象中，按照参数`what`获取*key*或者*value*，并通过指针返回；而`hashTypeCurrentObject`作为一个更加通用的接口，会根据对象的编码类型来调用`hashTypeCurrentFromZiplist`和`hashTypeCurrentFromHashTable`函数；最后一个函数`hashTypeCurrentObjectNewSds`功能与`hashTypeCurrentObject`相似，但是其获取到的*key*或者*value*使用一个新创建的`sds`数据来进行返回，可以理解为返回了*key*或者*value*的拷贝。
 
 ## 散列对象命令实现
+
+在执行*Redis*散列的系列命令前，这里首先定义了一个辅助函数，`hashTypeLookupWriteOrCreate`，其函数原型为：
+
 ```c
 robj *hashTypeLookupWriteOrCreate(client *c, robj *key);
 ```
 
+应用这个函数，会在*Redis*的内存数据库中调用`lookupKeyWrite`查找给定`key`所对应的散列对象。如果这个对象不存在，那么会使用`createHashObject`创建一个新的散列对象，并通过`dbAdd`将其加入到内存数据库之中；如果对象存在但不是散列类型，那么将错误信息返回给客户端；否则便将这个散列对象从函数中返回。
+
 ### HSET系列命令
-**HSET**命令的格式为：`HSET key field value`
+
+**HSET**命令的格式为：`HSET key field value [field value ...]`
 
 这个命令用于设定*key*所存储的散列对象中执行字段*field*的值，如果散列对象不存在，那么会向*Redis*内存数据库中存入一个新建的散列对象；如果*field*在散列中存在，那么它的值将会被覆盖。
 
@@ -158,7 +164,10 @@ void hsetCommand(client *c);
 void hsetnxCommand(client *c);
 ```
 
+上述两个便是用来实现**HSET**命令以及**HSETNX**命令的函数原型，其基础的逻辑都是通过调用`hashTypeSet`这个接口函数来进行*key-value*的设置，区别在于`hsetCommand`会循环调用`hashTypeSet`以实现命令设置多个*key-value*的目的；而`hsetnxCommand`函数在调用`hashTypeSet`前，会先调用`hashTypeExists`函数来检查*field*是否存在于散列对象之中。
+
 ### HGET系列命令
+
 **HGET**命令的格式为：`HGET key field`
 这个命令用于返回*key*所指定的散列对象中*field*字段所关联的值，如果散列对象不存在或者*field*不存在的时候，命令会返回`nil`空值。
 **HMEGET**命令的格式为：`HMGET key field [field ...]`
@@ -188,27 +197,58 @@ void hincrbyCommand(client *c);
 void hincrbyfloatCommand(client *c);
 ```
 
+上述这两个函数用于实现这组**INCRBY**命令，其基础逻辑是统一的，也就是使用`hashTypeGetValue`函数在散列对象中查找到对应*field*的值，然后对其执行完加减操作后，在调用`hashTypeSet`函数将新值写回散列对象之中。
+
 ### HDEL命令
+
+*Redis*为散列对象提供了一个删除给定*field*的命令**HDEL**，这个命令的格式为：
+
+`HDEL key field [field ...]`
+
+这个命令用于删除指定*key*的散列对象中的给定的*field*，命令直接结束后，会返回被成功删除的元素的个数。
+
 ```c
 void hdelCommand(client *c);
 ```
 
+*Redis*在**HDEL**命令的实现函数`hdelCommand`中，通过循环调用`hashTypeDelete`函数来将*field*从散列对象中删除，最后如果散列被删空，那么会通过`dbDelete`函数将这个对象从内存数据库中删除。
+
 ### HLEN命令
+
+**HLEN**命令用于获取给定*key*的散列对象中元素的个数，如果这个对应的散列对象不存在的时候，会被认为是一个空的散列对象而返回0，这个命令的格式为：`HLEN key`
+
 ```c
 void hlenCommand(client *c);
 ```
 
+`hlenCommand`函数，是通过`hashTypeLength`这个接口来获取散列对象的长度，借以实现**HLEN**命令的功能。
+
 ### HSTRLEN命令
+
+**HSTRLEN**命令的格式为：`HSTRLEN key field`，这个命令用于获取给定*key*对应的散列对象之中，*ffield*所对应的*value*数据的长度，如果散列对象不存在或者*field*字段不存在，那么这个命令或返回0。
+
 ```c
 void hstrlenCommand(client *c);
 ```
 
+`hstrlenCommand`函数通过调用散列对象的`hashTypeGetValueLength`接口来实现**HSTRLEN**命令的逻辑。
+
 ### HEXISTS命令
+
+**HEXISTS**这个命令的格式为：`HEXISTS key field`，使用这个命令，我们可以知道给定的*field*是否存在于*key*所对应的散列对象中，如果*field*存在，那么这个命令会返回1，否则命令会返回0。
+
 ```c
 void hexistsCommand(client *c);
 ```
 
+很显然，这个命令函数在底层使用的是散列对象的`hashTypeExists`的接口来实现的。
+
 ### HSCAN命令
+
+**HSCAN**命令的格式为：`HSCAN key cursor [MATCH pattern] [COUNT count]`
+
+这个命令于前面我们介绍哈希表时所介绍的**SCAN**命令类似，只不过**HSCAN**命令用于扫描给定*key*所对应的散列对象，而**SCAN**命令则是对整个*Redis*的内存数据库进行扫描。
+
 ```c
 void hscanCommand(client *c);
 ```
