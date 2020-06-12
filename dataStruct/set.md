@@ -85,18 +85,27 @@ sds setTypeNextObject(setTypeIterator *si);
 ## 集合对象命令实现
 ### SADD命令
 命令格式为：`SADD key member [member ...]`
+
+**SADD**这个命令用于添加一个或多个*member*到给定*key*对应集合对象中，如果*member*已经存在于集合中，则会忽略对这个*member*的插入；如果这个*key*对应的集合不存在，那么会先为这个*key*创建一个集合对象，然后在执行后续的插入操作。
+
 ```c
 void saddCommand(client *c);
 ```
 
 ### SREM命令
 命令格式为：`SREM key member [member ...]`
+
+**SREM**这个命令用于从给定的*key*集合中移除一个或者多个*member*，如果给定的*member*不存在于集合之中，那么会忽略对这个*member*的删除操作。
+
 ```c
 void sremCommand(client *c);
 ```
 
 ### SMOVE命令
 命令格式为：`SMOVE source destination member`
+
+**SMOVE**命令用于将*member*元素从*source*集合中移动到*destination*集合中，如果*member*不存在于*source*集合中，那么**SMOVE**命令则不会执行任何操作。
+
 ```c
 void smoveCommand(client *c);
 ```
