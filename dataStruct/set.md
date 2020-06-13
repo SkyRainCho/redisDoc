@@ -91,6 +91,7 @@ sds setTypeNextObject(setTypeIterator *si);
 ```c
 void saddCommand(client *c);
 ```
+`saddCommand`这个**SADD**命令实现函数会通过`lookupKeyWrite`从内存数据库之中查找*key*对应的集合对象，如果对象不存在，那么会调用`setTypeCreate`创建一个集合对象，将其加入到内存数据库之中。获得到集合对象之后，通过调用集合的插入接口`setTypeAdd`，将*key*插入到集合对象之中。
 
 ### SREM命令
 命令格式为：`SREM key member [member ...]`
@@ -100,6 +101,7 @@ void saddCommand(client *c);
 ```c
 void sremCommand(client *c);
 ```
+`sremCommand`这个**SREM**命令实现函数在通过`lookupKeyWriteOrReply`查找到*key*的集合对象，循环调用`setTypeRemove`将*key*从集合之中删除，如果集合被清空，那么会调用`dbDelete`将集合对象从内存数据库中删除。
 
 ### SMOVE命令
 命令格式为：`SMOVE source destination member`
@@ -109,24 +111,26 @@ void sremCommand(client *c);
 ```c
 void smoveCommand(client *c);
 ```
+`smoveCommand`这个**SMOVE**命令的实现函数，在执行移动元素的过程中，
+
 
 ### SISMEMBER命令
 命令格式为：`SISMEMBER key member`
-
+**SISMEMBER命令**这个命令用于判断*member*是否存在与集合对象*key*之中。
 ```c
 void sismemberCommand(client *c);
 ```
 
 ### SCARD命令
 命令格式为：`SCARD key`
-
+**SCARD**命令用于返回集合对象*key*之中所有的元素的数量，对于不存在的*key*则认为是一个空的集合对象返回0。
 ```c
 void scardCommand(client *c);
 ```
 
 ### SPOP命令
 命令格式为：`SPOP key [count]`
-
+**SPOP**命令用于从集合对象*key*中随机移除并返回一个或者多个元素。
 ```c
 void spopWithCountCommand(client *c);
 void spopCommand(client *c);
@@ -134,6 +138,7 @@ void spopCommand(client *c);
 
 ### SRANDMEMBER命令
 命令格式为：`SRANDMEMBER key [count]`
+**SRANDMEMBER**命令用于从集合对象*key*中随机返回一个或者多个元素，与**SPOP**命令不同，这个命令不会删除集合对象中的元素。
 ```c
 void srandmemberWithCountCommand(client *c);
 void srandmemberCommand(client *c);
@@ -151,20 +156,22 @@ int qsortCompareSetsByRevCardinality(const void *s1, const void *s2);
 命令格式为：
 1. `SINTER key [key ...]`
 2. `SINTERSTORE destination key [key ...]`
-
+上面这两个*Redis*命令都是用于计算多个集合对象*key*的交集的结果，如果某一个集合对象*key*不存在，则认为这是一个空的集合对象，并使用这个空集合参与集合的交集运算。**SINTER**命令与**SINTERSTORE**命令的差异在于，**SINTERSTORE**命令会将交集的结果存储在集合对象*destination*之中，如果这个集合存在，那么会覆盖这个*destination*集合对象。
 ```c
 void sinterGenericCommand(client *c, robj **setkeys, unsigned long setnum, robj *dstkey);
 void sinterCommand(client *c);
 void sinterstoreCommand(client *c);
 ```
 
-#### 集合差集并集命令
+#### 集合并集差集命令
 命令格式为：
 1. `SUNION key [key ...]`
 2. `SUNIONSTORE destination key [key ...]`
 3. `SDIFF key [key ...]`
 4. `SDIFFSTORE destination key [key ...]`
+前两个命令用于计算多个集合对象的并集结果，与集合交集命令相似，对于不存在的key，命令会认为这是一个空的集合对象，**SUNION**命令会将并集结果返回给客户端，而**SUNIONSTORE**会将结果存储在*destination*集合对象中。
 
+后两个命令用于计算多个集合的差集操作，也就是会返回存在于第一个*key*的集合中，同时不存在于后续*key*集合中的元素，**SDIFF**命令会将差集结果返回给客户端，而**SDIFFSTORE**会将结果存储在*destination*集合对象中。
 ```c
 void sunionDiffGenericCommand(client *c, robj **setkeys, int setnum, robj *dstkey, int op);
 void sunionCommand(client *c);
@@ -175,7 +182,7 @@ void sdiffstoreCommand(client *c);
 
 #### 集合扫描命令
 命令格式为：`SSCAN key cursor [MATCH pattern] [COUNT count]`
-
+这个命令与前面散列对象**HSCAN**命令类似，用于对一个集合对象*key*执行增量的扫描。
 ```c
 void sscanCommand(client *c);
 ```
