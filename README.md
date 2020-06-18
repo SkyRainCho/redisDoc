@@ -12,7 +12,7 @@
 * [压缩链表](advancedDataStruct/ziplist.md)
 * [压缩字典](advancedDataStruct/zipmap.md)
 * [整数集合](advancedDataStruct/intset.md)
-* [紧凑链表](advancedDataStruct/listpack.md)
+* [紧凑列表](advancedDataStruct/listpack.md)
 * [快速链表](advancedDataStruct/quicklist.md)
 * [基数树](advancedDataStruct/rax.md)
 
@@ -23,6 +23,14 @@
 * [集合对象](dataStruct/set.md)
 * [有序集合对象](dataStruct/zset.md)
 * [散列对象](dataStruct/hash.md)
+
+## 数据库操作
+
+* 内存数据库基础操作
+* 过期策略
+* 淘汰策略
+* RDB数据备份
+* AOF数据备份
 
 ## 网络IO接口
 * [套接字接口](network/anet.md)

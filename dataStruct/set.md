@@ -111,38 +111,57 @@ void sremCommand(client *c);
 ```c
 void smoveCommand(client *c);
 ```
-`smoveCommand`这个**SMOVE**命令的实现函数，在执行移动元素的过程中，
+`smoveCommand`这个**SMOVE**命令的实现函数，是通过对`source`集合对象调用`setTypeRemove`函数将*meber*元素弹出，然后在对`destination`集合对象调用`setTypeAdd`函数来实现的数据移动的。
 
 
 ### SISMEMBER命令
 命令格式为：`SISMEMBER key member`
 **SISMEMBER命令**这个命令用于判断*member*是否存在与集合对象*key*之中。
+
 ```c
 void sismemberCommand(client *c);
 ```
 
+`sismemberCommand`这个**SISMEMBER**命令的实现函数是通过集合对象的`setTypeIsMember`函数来实现。
+
 ### SCARD命令
+
 命令格式为：`SCARD key`
 **SCARD**命令用于返回集合对象*key*之中所有的元素的数量，对于不存在的*key*则认为是一个空的集合对象返回0。
 ```c
 void scardCommand(client *c);
 ```
 
+`scardCommand`这个**SCARD**命令的实现函数是通过集合对象的`setTypeSize`函数来实现的。
+
 ### SPOP命令
+
 命令格式为：`SPOP key [count]`
 **SPOP**命令用于从集合对象*key*中随机移除并返回一个或者多个元素。
+
 ```c
 void spopWithCountCommand(client *c);
 void spopCommand(client *c);
 ```
 
+上述两个**SPOP**命令的实现函数，本质上都是通过`setTypeRandomElement`函数从集合对象之中随机获取一个元素，在更具集合对象的编码类型，分别调用`intsetRemove`函数或者`setTypeRemove`函数，将这个元素从集合对象之中删除。
+
+在默认执行一个元素的删除操作时，流程比较简单，当要删除多个元素的时候，*Redis*定义了一个`spopWithCountCommand`这个函数专门用于处理这种情况。对于多个元素的删除，*Redis*划分了三种情况分别进行处理：
+
+1. 移除的数量大于等于集合对象的长度，对于这种情况，只需要将整个集合对象返回给客户端，然后在调用`dbDelete`函数将这个集合对象从内存数据库之中删除就可以。
+2. 移除的数量小于集合对象的长度，当移除后剩余元素的个数大于原有集合元素个数的20%时，就属于这种情况。对于这种情况，所执行的操作，相当于循环*count*，每次从集合中调用`setTypeRandomElement`来选择一个元素，然后调用`intsetRemove`或者`setTypeRemove`函数将其删除。
+3. 移除的数量接近集合对象的长度，对于这种情况，*Redis*应用了另外一个策略，首先计算出移除操作后集合中的剩余元素个数`remaining`，首先从原始集合对象中移除`remaining`个元素，将这些元素插入一个新的集合对象`newset`中，返回原始集合对象中剩余`count`个元素，然后用`newset`集合替换内存数据库中的原始集合对象。
+
 ### SRANDMEMBER命令
+
 命令格式为：`SRANDMEMBER key [count]`
 **SRANDMEMBER**命令用于从集合对象*key*中随机返回一个或者多个元素，与**SPOP**命令不同，这个命令不会删除集合对象中的元素。
 ```c
 void srandmemberWithCountCommand(client *c);
 void srandmemberCommand(client *c);
 ```
+
+**SRANDMEMBER**命令的实现函数与**SPOP**命令的实现函数类似，其基础逻辑是一致的，只不过对于**SRANDMEMBER**命令不需要执行删除操作。同时区别情况2与情况3的阈值不是百分二十，而是三分之一。
 
 ### 集合操作命令
 
@@ -156,6 +175,7 @@ int qsortCompareSetsByRevCardinality(const void *s1, const void *s2);
 命令格式为：
 1. `SINTER key [key ...]`
 2. `SINTERSTORE destination key [key ...]`
+
 上面这两个*Redis*命令都是用于计算多个集合对象*key*的交集的结果，如果某一个集合对象*key*不存在，则认为这是一个空的集合对象，并使用这个空集合参与集合的交集运算。**SINTER**命令与**SINTERSTORE**命令的差异在于，**SINTERSTORE**命令会将交集的结果存储在集合对象*destination*之中，如果这个集合存在，那么会覆盖这个*destination*集合对象。
 ```c
 void sinterGenericCommand(client *c, robj **setkeys, unsigned long setnum, robj *dstkey);
@@ -163,12 +183,22 @@ void sinterCommand(client *c);
 void sinterstoreCommand(client *c);
 ```
 
+上述三个函数是*Redis*用于实现**SINTER**命令的，其中`sinterGenericCommand`函数是交集操作的核心逻辑，另外两个函数都是通过对`sinterGenericCommand`的封装来实现的。
+
+`sinterGenericCommand`这个函数的逻辑为：
+
+1. 收集所有的*key*对应的集合对象到一个集合对象数组`sets`之中。
+2. 调用`qsort`函数，对收集到的集合对象按照内部元素从少到多的顺序进行排序。
+3. 遍历元素数量最小的那个集合对象中的每一个元素，检查其是否存在于其他的集合之中，如果元素存在于剩余的所有集合对象之中，那么说明其是交集操作的结果之一；否则将这个元素将被忽略。
+
 #### 集合并集差集命令
+
 命令格式为：
 1. `SUNION key [key ...]`
 2. `SUNIONSTORE destination key [key ...]`
 3. `SDIFF key [key ...]`
 4. `SDIFFSTORE destination key [key ...]`
+
 前两个命令用于计算多个集合对象的并集结果，与集合交集命令相似，对于不存在的key，命令会认为这是一个空的集合对象，**SUNION**命令会将并集结果返回给客户端，而**SUNIONSTORE**会将结果存储在*destination*集合对象中。
 
 后两个命令用于计算多个集合的差集操作，也就是会返回存在于第一个*key*的集合中，同时不存在于后续*key*集合中的元素，**SDIFF**命令会将差集结果返回给客户端，而**SDIFFSTORE**会将结果存储在*destination*集合对象中。
@@ -180,7 +210,15 @@ void sdiffCommand(client *c);
 void sdiffstoreCommand(client *c);
 ```
 
+*Redis*使用`sunionDiffGenericCommand`这个函数来作为并集与差集操作的通用接口：
+
+1. 对于集合的交集操作，*Redis*的实现很简单，就是遍历所有收集到的集合对象，将其调用`setTypeAdd`将其插入一个目标集合中，因为`setTypeAdd`函数可以保证加入到集合中元素的唯一性，也就是满足了并集操作的要求，这个算法的时间复杂度为`O(N)`，其中`N`是所有集合中元素的个数。
+2. 对于集合的差集操作，对于差集操作，*Redis*提供了两种算法：
+   1. 算法1中，会遍历第一个集合对象中的每一个元素，如果这个元素不存在于后续的集合对象中，那么这个元素便作为差集的结果之一，这个算法的时间复杂度为`O(N*M)`，其中`N`为第一个集合对象中元素的个数，而`M`为集合对象的个数。
+   2. 算法2中，会遍历所有集合对象中的每一个元素，如果是第一个集合对象中的元素，那么就将其加入到一个目标临时集合中；否则就尝试从目标集合中将这个元素删除，在完成所有元素的遍历之后，目标集合中存储的便是差集的结果，这个算法的时间复杂度为`O(N)`，其中`N`是所有集合对象中元素个数的总和。
+
 #### 集合扫描命令
+
 命令格式为：`SSCAN key cursor [MATCH pattern] [COUNT count]`
 这个命令与前面散列对象**HSCAN**命令类似，用于对一个集合对象*key*执行增量的扫描。
 ```c
