@@ -16,7 +16,9 @@
 #### 字符串型对象的构造
 *Redis*对于字符串型的字符串对象定义了两种编码方式：
 1. 如果使用的是`OBJ_ENCODING_RAW`这种编码方式，那么表示对象的`robj`与表示底层数据的`sds`在内存分布上是相互分离的，通过`robj.ptr`指针指向`sds`数据，来实现对象对数据的引用。
-2. 如果使用的是`OBJ_ENCODING_RAW`这种编码方式，那么对象`robj`数据与底层数据的`sds`是处于一个连续的内存块中的，`sds`数据存储在`robj`数据之后。
+	![RAW编码字符串](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/RAW%E7%BC%96%E7%A0%81%E5%AD%97%E7%AC%A6%E4%B8%B2.PNG)
+2. 如果使用的是`OBJ_ENCODING_EMBSTR`这种编码方式，那么对象`robj`数据与底层数据的`sds`是处于一个连续的内存块中的，`sds`数据存储在`robj`数据之后。
+	![EMB编码字符串](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/EMB%E7%BC%96%E7%A0%81%E5%AD%97%E7%AC%A6%E4%B8%B2.PNG)
 
 *Redis*为创建字符串型对象提供了三个接口函数：
 ```c
