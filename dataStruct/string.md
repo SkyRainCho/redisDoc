@@ -181,7 +181,7 @@ void setnxCommand(client *c);
 void setexCommand(client *c);
 void psetexCommand(client *c);
 ```
-在代码层面，*Redis*通过上面的五个函数来实现**SET**系列命令的，而`setGenericCommand`函数时实现**SET**的基础，其基础的逻辑为：
+在代码层面，*Redis*通过上面的五个函数来实现**SET**系列命令的，而`setGenericCommand`函数是实现**SET**的基础，其基础的逻辑为：
 1. 如果**SET**指令携带了`NX`参数或者`XX`参数，那么会调用`lookupKeyWrite`对参数`key`进行查找，如果查找结果与参数预期不符，那么将错误返回给客户端。
 2. 通过`setKey`函数，将*key-value*写入内存数据库。
 3. 如果设置了过期时间，那么通过`setExpire`将过期时间设置给对应的*key*。
@@ -324,7 +324,7 @@ void incrDecrCommand(client *c, long long incr)
 		new = o;
 		o->ptr = (void *)((long)value);
 	} else {
-		//不满足上面的情况，则需要位这个新的数值创建一个新的字符串对象
+		//不满足上面的情况，则需要为这个新的数值创建一个新的字符串对象
 		new = createStringObjectFromLongLongForValue(value);
 		if (o) {
 			dbOverwrite(c->db, c->argv[1], new);
