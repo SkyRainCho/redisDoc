@@ -7,7 +7,7 @@
 2. `OBJ_ENCODING_INT`
 3. `OBJ_ENCODING_EMBSTR`
 
-其中当字符串的长度较短的时候，*Redis*会采用`OBJ_ENCODING_EMBSTR`的编码方式，这个长度阈值的定义为`#define OBJ_ENCODING_EMBSTR_SIZE_LIMIT 44`，当超过这个长度的字符串则会才用`OBJ_ENCODING_RAW`的编码方式，而当这个字符串实际上是一个整形数的时候，*Redis*则会采用`OBJ_ENCODING_INT`对其进行编码。
+其中当字符串的长度较短的时候，*Redis*会采用`OBJ_ENCODING_EMBSTR`的编码方式，这个长度阈值的定义为`#define OBJ_ENCODING_EMBSTR_SIZE_LIMIT 44`，当超过这个长度的字符串则用`OBJ_ENCODING_RAW`的编码方式，而当这个字符串实际上是一个整形数的时候，*Redis*则会采用`OBJ_ENCODING_INT`对其进行编码。
 
 字符串对象类型是*Redis*中最基本的数据类型，虽然名为字符串数据对象，但是其可以存储的数据除了数字，文本数据之外，还可以存储例如一张图片或者其他的序列化数据，其本质原因是，字符串对象类型底层采用的是`sds`数据类型，而这个类型是二进制安全的，因此可以存储任何数据，每一个字符串对象最大可以存储512MB的数据，这个限制是通过*src/t_string.c*文件中的静态函数`checkStringLength`来定义的。
 
@@ -52,12 +52,12 @@ robj *createStringObjectFromLongLongWithOptions(long long value, int valueobj);
 robj *createStringObjectFromLongLong(long long value);
 robj *createStringObjectFromLongLongForValue(long long value);
 ```
-其中`createStringObjectFromLongLongWithOptions`是这个三个函数中的基础，这个函数会给定一个整形数`value`，返回对应的字符串对象，如果`valueobj`参数为1，那么*Redis*会强制为`value`创建一个独立的字符串对象，否侧如果`value`小于`OBJ_SHARED_INTEGERS`的话，*Redis*则会为`value`则会返回系统创建的共享对象。其具体的执行步骤为：
+其中`createStringObjectFromLongLongWithOptions`是这个三个函数中的基础，这个函数会给定一个整形数`value`，返回对应的字符串对象，如果`valueobj`参数为1，那么*Redis*会强制为`value`创建一个独立的字符串对象，否则如果`value`小于`OBJ_SHARED_INTEGERS`的话，*Redis*则会为`value`则会返回系统创建的共享对象。其具体的执行步骤为：
 1. 判断`value`以及`valueobj`的数值，如果满足`value >= 0 && value < OBJ_SHARED_INTEGERS && valueobj == 0`，那么直接从`shared.integers`中返回共享对象。
 2. 如果不满足1中的条件，那么判断`value >= LONG_MIN && value <= LONG_MAX`，如果满足这种情况，那么使用`OBJ_ENCODING_INT`编码方式创建一个字符串对象，并使用`o->ptr = (void *)((long)value);`将`value`存储在`robj.ptr`指针上。
 3. 如果上述两个条件都不满足，那么*Redis*会通过`sdsfromlonglong`创建一个`sds`数据，并使用这个数据创建一个字符串对象。
 
-而`createStringObjectFromLongLong`和`createStringObjectFromLongLongForValue`则是对于`createStringObjectFromLongLongWithOptions`函数的一个封装，分别相当与`valueobj == 0`以及`valueobj == 1`的情况。
+而`createStringObjectFromLongLong`和`createStringObjectFromLongLongForValue`则是对于`createStringObjectFromLongLongWithOptions`函数的一个封装，分别相当于valueobj == 0`以及`valueobj == 1`的情况。
 
 ##### 浮点数数值
 ```c
@@ -72,7 +72,7 @@ robj *createStringObjectFromLongDouble(long double value, int humanfriendly);
 int isSdsRepresentableAsLongLong(sds s, long long *llval);
 int isObjectRepresentableAsLongLong(robj *o, long long *llval);
 ```
-上面两个函数分别用于从一个`sds`数据和`robj`数据中尝试解码出整形数据，如果解码失败函数会返回`C_ERR`，否侧返回`C_OK`，并解码出的数值存储在`llval`之中。而这个`isObjectRepresentableAsLongLong`现在在*Redis*并未被使用，取代它的是使用更加广泛的`getLongLongFromObject`的函数。
+上面两个函数分别用于从一个`sds`数据和`robj`数据中尝试解码出整形数据，如果解码失败函数会返回`C_ERR`，否则返回`C_OK`，并解码出的数值存储在`llval`之中。而这个`isObjectRepresentableAsLongLong`现在在*Redis*并未被使用，取代它的是使用更加广泛的`getLongLongFromObject`的函数。
 
 ```c
 int getLongLongFromObject(robj *o, long long *target);
@@ -144,7 +144,7 @@ robj *getDecodedObject(robj *o);
 ```c
 robj *dupStringObject(const robj *o);
 ```
-`dupStringObject`这个函数会赋值一个字符串对象，并确保返回的对象与原始对象由相同的编码类型。
+`dupStringObject`这个函数会赋值一个字符串对象，并确保返回的对象与原始对象具有相同的编码类型。
 
 ```c
 size_t stringObjectLen(robj *o);
