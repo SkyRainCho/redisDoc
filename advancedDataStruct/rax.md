@@ -152,9 +152,17 @@ if (i != len || (h->iscompr && splitpos != 0) || !h->iskey)
 raxNode *raxAddChild(raxNode *n, unsigned char c, raxNode **childptr, raxNode ***parentlink);
 ```
 
-这个函数会向给定的基数树节点`n`中插入一个表示字符`c`的子节点，由于在向节点中插入新的子节点可能会导致基数树节点被重新分配内存，因此这个函数会返回新的`n`节点的指针，新创建的子节点会通过`childptr`参数返回，这个节点在`raxNode.data`中存储的指针的位置会通过`parentlink`的参数进行返回。
+这个函数会向给定的基数树节点`n`中插入一个表示字符`c`的子节点，由于在向节点中插入新的子节点可能会导致基数树节点被重新分配内存，因此这个函数会返回新的`n`节点的指针，新创建的子节点会通过`childptr`参数返回，这个节点在`raxNode.data`中存储的指针的位置会通过`parentlink`的参数进行返回。这里需要注意的是，待插入节点`n`不可以是压缩节点，必须是一个普通的节点。
 
+例如，下图所显示的，一个给定的基数树普通节点，该节点具有四条分支子节点，分别用于匹配`abde`四个字符，
 
+![基数树节点](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/%E5%9F%BA%E6%95%B0%E6%A0%91%E8%8A%82%E7%82%B9.PNG)
+
+当需要向这个节点之中插入一个表示匹配字符`c`的子节点：
+
+![基数树节点插入](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/%E5%9F%BA%E6%95%B0%E6%A0%91%E8%8A%82%E7%82%B9%E6%8F%92%E5%85%A5.PNG)
+
+在了解了向基数树节点之中插入子节点的过程之后，我们来看一下向基数树中插入节点的操作：
 
 ```c
 int raxInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old);
