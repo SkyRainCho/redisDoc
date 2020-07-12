@@ -168,13 +168,31 @@ raxNode *raxAddChild(raxNode *n, unsigned char c, raxNode **childptr, raxNode **
 int raxInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old);
 int raxTryInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old);
 ```
-上述两个函数用于实现向基数树中插入一对*key-value*，其中*key*通过参数`s`以及`len`描述，而*value*则是通过`data`参数来表示，两个函数的区别在于如果*key*已经存在于基数树之中，那么`raxInsert`函数会覆盖*key*所对应的*value*；而`raxTryInsert`函数则不会覆盖已有的*key-value*。对于基数树的插入，*Redis*分成了五种情况进行了讨论：
+上述两个函数用于实现向基数树中插入一对*key-value*，其中*key*通过参数`s`以及`len`描述，而*value*则是通过`data`参数来表示，两个函数的区别在于如果*key*已经存在于基数树之中，那么`raxInsert`函数会覆盖*key*所对应的*value*；而`raxTryInsert`函数则不会覆盖已有的*key-value*。
+
+对于基数树的插入，*Redis*首先回调用`raxLowWalk`底层搜索函数找到合适的插入位置，当查找成功的时候，如果查找停止在某一个普通节点上，或者停止在一个压缩节点的起始位置，这样会尝试为这个节点写入给定*key-value*。
+
+当节点的查找停留在一个压缩节点中的时候，那么需要在继续后续操作前，将这个压缩节点进行拆分。对于压缩节点的拆分，有几种可能。想象存在一个压缩节点`h`，其中包含一个字符串`ANNIBALE`，由于这是一个压缩节点，因此在`raxNode.data`之中只包含一个指向`E`子节点的指针。为了能够更真实的贴近真实的情况，我们假设这个`h`节点的`E`子节点的指针指向一个同样是压缩节点且包含字符串`SCO`的子节点，这个子节点不具有子节点，其在内存中的分布如下图所示：
+
+
+
+对于上述基数树节点的插入，*Redis*分成了五种情况进行了讨论：
+1. 插入一个`ANNIENTARE`的*key*
+
+2. 插入一个`ANNIBALI`的*key*
+
+3. 插入一个`AGO`的*key*
+
+4. 插入一个`CIAO`的*key*
+
+5. 插入一个`ANNI`的*key*
 
 
 ### 节点的删除
 ```c
 int raxRemove(rax *rax, unsigned char *s, size_t len, void **old);
 ```
+这个函数的作用是从给定的基数树`rax`中删除由`s`和`len`所指定的*key*，如果*key*被找到并且被删除，那么函数返回1，否则函数会返回0。当*key*被找到并被删除，同时`old`参数没有传`NULL`，那么这个*key*对应的*value*会通过`old`参数返回给调用者。
 
 
 ```c
