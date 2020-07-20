@@ -130,28 +130,82 @@ int zsetAdd(robj *zobj, double score, sds ele, int *flags, double *newscore);
 
 这个函数用于向有序集合之中插入一个新的元素，或者更新一个已有元素的分值。根绝参数`flags`传入的数值不同，这个函数会执行不同的策略：
 
-1. `ZADD_INCR`
-2. `ZADD_NX`
-3. `ZADD_XX`
+1. `ZADD_INCR`，在当前元素分值的基础上加上给定的分值，用以更新元素分值；如果对应元素的*key*不存在，那么就假定其分值为0。
+2. `ZADD_NX`，拥有这个标记，那么只会在给定的*key*元素不存在的时候，才会执行操作。
+3. `ZADD_XX`，拥有这个标记，那么指挥在给定的*key*元素存在的时候，才会执行操作。
+
+同时，操作的结果标记也会通过`flags`这个参数返回，而能够返回的标记有：
+
+1. `ZADD_NAN`，这是一个失败的结果，由于分值不是数值所导致。
+2. `ZADD_ADDED`，元素已经被添加。
+3. `ZADD_UPDATED`，元素已经被更新。
+4. `ZADD_NOP`，由于带着`ZADD_NX`或者`ZADD_XX`标记而导致操作失败。
+
+最终，如果函数执行成功，那么会返回1，同时通过`flags`返回标记；如果函数执行发生错误，那么会返回0。在向采用`OBJ_ENCODING_ZIPLIST`编码的有序集合中插入新元素的时候，如果有序集合中元素的个数达到阈值，或者单一元素的长度达到阈值，那么会调用`zsetConvert`函数，将其转换为`OBJ_ENCODING_SKIPLIST`编码格式。
+
+在了解向有序集合之中插入元素的函数之后，我们可以通过下面这个函数来实现从有序集合之中删除一个给定的元素：
 
 ```c
-
 int zsetDel(robj *zobj, sds ele);
+```
+
+这个函数在执行成功时，会返回1，当待删除的元素不存在于有序集合中的时候，会返回0。在删除元素的同时，会检查删除
+
+最后便是如何获取一个给定的元素在有序集合之中排序：
+
+```c
 long zsetRank(robj *zobj, sds ele, int reverse);
 ```
+
+这个函数可以根据`reserve`参数的不同，返回一个从0开始的正向排序值，或者一个反向排序值。针对使用`OBJ_ENCODING_ZIPLIST`编码的有序集合，会遍历整个底层的压缩链表，通过`ziplistCompare`函数，来进行查找；对于使用`OBJ_ENCODING_SKIPLIST`的有序集合，则会先从`zset`中的哈希便利，查找对应的分值，在使用分值在跳跃表中通过`zslGetRank`来查找对应的顺序。
+
 
 
 ## 有序集合对象命令
 
 ### ZADD与ZINCRBY命令
+
+*Redis*提供了两个命令用于向一个有序集合之中插入元素或者修改元素的分值：
+
+1. **ZADD**命令，该命令的格式为：
+
+   `ZADD key [NX|XX] [CH] [INCR] score member [score member ...]`
+
+   这个命令用于将所有指定成员添加到给定`key`所对应的有序集合之中，添加的时候，可以添加多个成员。如果待添加的元素已经存在于有序集合之中，那么会更新对应元素的分值。该命令在`score`与`member`前支持一些参数：
+
+   1. `NX`，如果携带该参数，则只添加新的元素成员。
+   2. `XX`，如果携带该参数，则是只会更新已有的元素成员，但是这个参数与`NX`参数互斥。
+   3. `INCR`，如果携带这个参数，则会对元素的分值进行递增操作，如果给定的元素不存在，那么会向有序集合中插入这个新的元素，并指定其分值为0，然后在执行分值的递增操作。
+   4. `CH`，如果设置了这个参数，那么命令会返回被修改的元素的个数，而在默认的情况下，这个命令则会返回被新增的元素的数。
+
+2. **ZINCRBY**命令，该命令的格式为：
+
+   `ZINCRBY key increment member`
+
+   这个命令用于向`key`对应的有序集合之中的`member`元素的分值上递增`increment`分值。这个命令与携带了`INCR`参数的**ZADD**命令相似。
+
+由于本质上**ZINCRBY**命令是一种特殊形式的**ZADD**命令，因此*Redis*对于这两个命令的实现，使用了统一的通用接口`zaddGenericCommand`，而两个命令对应的函数都是通过调用`zaddGenericCommand`来实现的。
+
 ```c
 void zaddGenericCommand(client *c, int flags);
 void zaddCommand(client *c);
 void zincrbyCommand(client *c);
 ```
 
+在`zaddGenericCommand`这个函数中：
+
+1. 调用`lookupKeyWrite`在内存数据库中查找给定`key`对应的有序集合对象。
+2. 如果对象不存在，那么判断输入数据的大小，选择`createZsetObject`或者`createZsetZiplistObject`接口i来创建一个有序集合对象。
+3. 循环调用`zsetAdd`将客户端输入的数据更新到`key`所对应的有序集合之中。
 
 ### ZREM命令
+
+在了解有序集合对象插入新元素的命令之后，我们可以来看一个删除有序集合内元素的命令**ZREM**，这个名的格式为：
+
+`ZREM key member [member ...]`
+
+这个命令的含义为从`key`对应的有序集合之中删除一个或者多个`member`元素。参数`member`所对应的元素可以不存在与有序集合之中，这个命令在执行成功之后，会返回被删除元素成员的个数。
+
 ```c
 void zremCommand(client *c);
 ```
