@@ -209,18 +209,55 @@ void zincrbyCommand(client *c);
 ```c
 void zremCommand(client *c);
 ```
-
+`zremCommand`这个函数是*Redis*用于实现**ZREM**命令的，在通过调用`lookupKeyWriteOrReply`函数查找到`key`对应的有序集合后，循环调用`zsetDel`将成员元素从有序集合中删除，最后如果有序集合中成员个数为0的话，那么就会将其从内存数据库之中删除。
 
 ### ZREMRANGEBYRANK、ZREMRANGEBYSCORE与ZREMRANGEBYLEX命令
+在介绍过*Redis*中用于从有序集合中删除元素的命令**ZREM**之后，我们可以看一下*Redis*用于按照条件对有序集合进行批量删除的一组命令：
+
+1. **ZREMRANGEBYRANK**，这个命令用于从`key`所指定的有序集合中删除指定排名区间内的所有元素，这个命令的格式为：
+
+    `ZREMRANGEBYRANK key start stop`
+
+    在这个命令之中的下标`start`以及`stop`可以是从0开始的正向排名，也可以是以-1开始的反向排名。命令执行成功后，会返回被删除的成员的个数。
+
+2. **ZREMRANGEBYSCORE**，这个命令用于从`key`所指定的有序集合中删除指定分值区间内的所有成员，这个命令的格式为：
+
+    `ZREMRANGEBYSCORE key min max`
+
+    这个命令执行成功后，会返回被删除的成员的个数。
+
+3. **ZREMRANGEBYLEX**，这个命令用于从`key`所指定的有序集合中删除名称按照字典顺序区间内的所有成员，这个命令的格式为：
+
+    `ZREMRANGEBYLEX key min max`
+
+    执行这条命令的基数为，有序集合之中的所有的元素的分值必须一致，因为有序集合中，是优先按照分值排序，在分值相同的基础上，在按照元素的字典顺序进行排序的。因此，如果在一个分值不同的有序集合之中指向这个命令，将会导致错误产生。
+
 ```c
 void zremrangeGenericCommand(client *c, int rangetype);
 void zremrangebyrankCommand(client *c);
 void zremrangebyscoreCommand(client *c);
 void zremrangebylexCommand(client *c);
 ```
+*Redis*对于上述的三个命令定义了一个通过的函数接口`zremrangeGenericCommand`，同时还定义了三个类型，用于标记三种删除类型：
+```c
+#define ZRANGE_RANK 0
+#define ZRANGE_SCORE 1
+#define ZRANGE_LEX 2
+```
+*Redis*在实现`zremrangeGenericCommand`时，会执行下面4步的逻辑：
+1. `zremrangeGenericCommand`会根据`rangetype`类型，校验客户端输入的区间参数的合法性。
+2. 在*Redis*的内存数据库中查找`key`所对应的有序集合；如果是按照排名进行删除，那么会结合有序集合的长度，对排名进行检查。
+3. 根据有序集合对应的编码类型以及删除类型，分别调用前面提到的有序集合批量删除接口，对数据进行删除。
+4. 最终将删除的结果返回给客户端调用者。
 
 
 ### ZUNIONSTORE与ZINTERSTORE命令
+针对有序集合，*Redis*提供了两个用于处理集合交集与并集的命令：
+1. **ZUNIONSTORE**，这个命令的格式为：
+    `ZUNIONSTORE destination numkeys key [key ...] [WEIGHTS weight] [AGGREGATE SUM|MIN|MAX]`
+
+2. **ZINTERSTORE**，这个命令的格式为：
+    `ZINTERSTORE destination numkeys key [key ...] [WEIGHTS weight] [AGGREGATE SUM|MIN|MAX]`
 ```c
 void zunionInterGenericCommand(client *c, robj *dstkey, int op);
 void zunionstoreCommand(client *c);
@@ -229,6 +266,12 @@ void zinterstoreCommand(client *c);
 
 
 ### ZRANGE与ZREVRANGE命令
+*Redis*为有序集合的区间操作提供了两个命令：
+1. **ZREVRANGE**，这个命令的格式为：
+
+    `ZREVRANGE key start stop [WITHSCORES]`
+
+    这个命令用于
 ```c
 void zrangeGenericCommand(client *c, int reverse);
 void zrangeCommand(client *c);
@@ -276,6 +319,19 @@ void zscoreCommand(client *c);
 
 
 ### ZRANK与ZREVRANK命令
+对于有序集合的排名操作，*Redis*给出了两个命令：
+1. **ZRANK**，这个命令用于获取获取元素按照分值递增顺序的排名，其格式为：
+
+    `ZRANK key member`
+
+    这个命令所返回的排名是以0开始的，也就是说如果函数返回0，那么说明这个成员在当前的有序集合之中是最小的；同时对于一个不存在的成员，命令会返回一个空值`nil`。
+
+2. **ZREVRANK**，这个命令用于获取元素按照分值递减排序的排名，这个命令的格式为：
+    
+    `ZREVRANK key member`
+
+    这个命令所返回的排名依然是以0开始的，如果函数返回0，那么说明这个成员在当前的有序集合之中是最大的。
+
 ```c
 void zrankGenericCommand(client *c, int reverse);
 void zrankCommand(client *c);
