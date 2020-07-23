@@ -305,14 +305,24 @@ void zrangebylexCommand(client *c);
 void zrevrangebylexCommand(client *c);
 ```
 
-
 ### ZCARD命令
+
+**ZCARD**命令用于获取给定的`key`所对应的成员个数，该命令的格式为：
+
+`ZCARD key`
+
 ```c
 void zcardCommand(client *c);
 ```
 
-
 ### ZSCORE命令
+
+**ZSCORE**命令用于返回有序集合中某个指定成员的分值。该函数的格式为：
+
+`ZSCORE key member`
+
+如果`key`对应的有序集合不存在，或者`member`不存在于有序集合之中，则该命令返回`nil`值，否则成功的情况下，则会返回对应的成员的分值。
+
 ```c
 void zscoreCommand(client *c);
 ```
@@ -327,7 +337,7 @@ void zscoreCommand(client *c);
     这个命令所返回的排名是以0开始的，也就是说如果函数返回0，那么说明这个成员在当前的有序集合之中是最小的；同时对于一个不存在的成员，命令会返回一个空值`nil`。
 
 2. **ZREVRANK**，这个命令用于获取元素按照分值递减排序的排名，这个命令的格式为：
-    
+   
     `ZREVRANK key member`
 
     这个命令所返回的排名依然是以0开始的，如果函数返回0，那么说明这个成员在当前的有序集合之中是最大的。
@@ -344,8 +354,24 @@ void zrevrankCommand(client *c);
 void zscanCommand(client *c);
 ```
 
-
 ### ZPOPMIN与ZPOPMAX命令
+
+*Redis*对于有序集合给出了两个用于弹出数据的命令：
+
+1. **ZPOPMIN**，这个命令从`key`所对应的有序集合之中弹出最小的若干个成员。这个命令的格式为：
+
+   `ZPOPMIN key [count]`
+
+   该命令如果不给出`count`，则默认为1，也就是弹出有序集合中最小的那个成员。该命令执行成功后，会返回弹出的成员。
+
+2. **ZPOPMAX**，这个命令从`key`所对应的有序集合之中弹出最大的若干个成员。这个命令的格式为：
+
+   `ZPOPMAX key [count]`
+
+   这个命令与**ZPOPMIN**类似，成功之后都是会返回弹出的成员。
+
+上述的两个命令中的`count`参数可以大于有序集合的元素个数，这种情况下，命令不会返回错误，只会将有序集合之中的全部元素弹出。
+
 ```c
 void genericZpopCommand(client *c, robj **keyv, int keyc, int where, int emitkey, robj *countarg);
 void zpopminCommand(client *c);
@@ -353,6 +379,9 @@ void zpopmaxCommand(client *c);
 ```
 
 ### BZPOPMIN与BZPOPMAX命令
+
+
+
 ```c
 void blockingGenericZpopCommand(client *c, int where);
 void bzpopminCommand(client *c);
