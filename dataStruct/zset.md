@@ -267,42 +267,82 @@ void zinterstoreCommand(client *c);
 
 ### ZRANGE与ZREVRANGE命令
 *Redis*为有序集合的区间操作提供了两个命令：
-1. **ZREVRANGE**，这个命令的格式为：
+1. **ZRANGE**，这个命令的格式为：
+
+    `ZRANGE key start stop [WITHSCORES]`
+
+    这个命令用于返回在有序集合中的指定排序范围的所有成员。如果携带了`WITHSCORES`参数，那么这个函数会在返回成员元素之外，还会返回成员元素的分值。返回成员元素的顺序是按照分值递增的顺序来排序的。
+    
+2. **ZREVRANGE**，这个命令的格式为：
 
     `ZREVRANGE key start stop [WITHSCORES]`
 
-    这个命令用于
+    这个命令的功能与**ZRANGE**相似，区别在于所返回的元素的顺序是按照分值递减的顺序来排序的。
 ```c
 void zrangeGenericCommand(client *c, int reverse);
 void zrangeCommand(client *c);
 void zrevrangeCommand(client *c);
 ```
 
-
 ### ZRANGEBYSCORE与ZREVRANGEBYSCORE命令
+
+除了基于排序的区间成员的获取命令，*Redis*还提供了两个基于分值的区间成员获取的命令**ZRANGEBYSCORE**以及**ZREVRANGEBYSCORE**命令：
+
+1. **ZRANGEBYSCORE**命令的格式为：
+
+   `ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]`。
+
+2. **ZREVRANGEBYSCORE**命令的格式为：
+
+   `ZREVRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]`
+
+上述这两个命令都是用于从`key`所指定的有序集合返回落在`min`以及`max`区间内的成员元素，这两个命令都可以携带两个可选参数：
+
+1. `WITHSCORES`，如果命令的调用者给出了这个参数，那么成团的分值也会一并返回。
+2. `LIMIT`，这个可选参数主要数用来对返回结果的个数进行限制，其中`offset`用于表示结果的起始位置，而`count`则用来表示返回结果的个数。
+
 ```c
 void genericZrangebyscoreCommand(client *c, int reverse);
 void zrangebyscoreCommand(client *c);
 void zrevrangebyscoreCommand(client *c);
 ```
 
+### ZRANGEBYLEX与ZREVRANGEBYLEX命令
+
+最后*Redis*还提供了两个基于字典顺顺序获取有序集合区间成员数据的命令，**ZRANGEBYLEX**以及**ZREVRANGEBYLEX**这两个命令，这两个命令所操作的有序集合，其元素分值必须都是一致的。
+
+1. **ZRANGEBYLEX**这个命令的格式为：
+
+   `ZRANGEBYLEX key min max [LIMIT offset count]`
+
+2. **ZREVRANGEBYLEX**这个命令的格式为：
+
+   `ZREVRANGEBYLEX key min max [LIMIT offset count]`
+
+```c
+void genericZrangebylexCommand(client *c, int reverse);
+void zrangebylexCommand(client *c);
+void zrevrangebylexCommand(client *c);
+```
 
 ### ZCOUNT命令
+
+*Redis*使用**ZCOUNT**命令来获取有序集合之中落于指定分值之间的成员的个数，这个命令的格式为：
+
+`ZCOUNT key min max`
+
 ```c
 void zcountCommand(client *c);
 ```
 
 ### ZLEXCOUNT命令
+
+对于字典区间的计数，*Redis*也提供了一个命令**ZLEXCOUNT**，用获取有序集合中指定成员之间的成员的个数，因为这是基于字典顺序的操作，因此需要有序集合之中的每个成员的分值要都相同，这个命令的格式为：
+
+`ZLEXCOUNT key min max`
+
 ```c
 void zlexcountCommand(client *c);
-```
-
-
-### ZRANGEBYLEX与ZREVRANGEBYLEX命令
-```c
-void genericZrangebylexCommand(client *c, int reverse);
-void zrangebylexCommand(client *c);
-void zrevrangebylexCommand(client *c);
 ```
 
 ### ZCARD命令
@@ -348,12 +388,6 @@ void zrankCommand(client *c);
 void zrevrankCommand(client *c);
 ```
 
-
-### ZSCAN命令
-```c
-void zscanCommand(client *c);
-```
-
 ### ZPOPMIN与ZPOPMAX命令
 
 *Redis*对于有序集合给出了两个用于弹出数据的命令：
@@ -380,7 +414,12 @@ void zpopmaxCommand(client *c);
 
 ### BZPOPMIN与BZPOPMAX命令
 
+对于上面的**ZPOPMIN**以及**ZPOPMAX**命令，*Redis*还提供了带有阻塞功能的版本：
 
+1. **BZPOPMIN**命令，其命令格式为：`BZPOPMIN key [key ...] timeout`
+2. **BZPOPMAX**命令，其命令格式为：`BZPOPMAX key [key ...] timeout`
+
+这两个命令都可以处理多个有序集合对象，在参数中的所有有序集合都是空的情况下，会阻塞客户端的连接，`timeout`会指定客户端被阻塞的最大秒数，0则便是永久阻塞。当所有的集合并非都是为空的情况下，会按照命令`key`的输入顺序从第一个非空的集合之中弹出最大或者最小的成员。
 
 ```c
 void blockingGenericZpopCommand(client *c, int where);
