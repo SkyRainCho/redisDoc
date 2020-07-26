@@ -255,9 +255,13 @@ void zremrangebylexCommand(client *c);
 针对有序集合，*Redis*提供了两个用于处理集合交集与并集的命令：
 1. **ZUNIONSTORE**，这个命令的格式为：
     `ZUNIONSTORE destination numkeys key [key ...] [WEIGHTS weight] [AGGREGATE SUM|MIN|MAX]`
-
 2. **ZINTERSTORE**，这个命令的格式为：
     `ZINTERSTORE destination numkeys key [key ...] [WEIGHTS weight] [AGGREGATE SUM|MIN|MAX]`
+
+上述两个命令的用途是计算给定的`numkeys`个有序集合交集或者并集结果，并将结果存储在`destination`对应的有序集合之中，可以选择性的给出`WEIGHTS`参数，用于设定计算分值时所需要的用到的权重因子，如果没有指定这个参数，那么默认的权重因子便是1；通过可选参数`AGGREGATE`，我们可以指定不同有序集合中的相同成员在存储到目标集合中时分值要采用何种聚合方式，默认是`SUM`，如果使用参数`MIN`或者`MAX`，目标集合中成员分值就是所有集合中最小或者最大的分值。
+
+这里需要注意的是`destination`集合会在操作结束之后被覆盖。
+
 ```c
 void zunionInterGenericCommand(client *c, robj *dstkey, int op);
 void zunionstoreCommand(client *c);
@@ -284,6 +288,11 @@ void zrangeCommand(client *c);
 void zrevrangeCommand(client *c);
 ```
 
+函数`zrangeGenericCommand`函数是上面这两个命令的实现基础：
+
+1. 对于使用`OBJ_ENCODING_ZIPLIST`实现有序集合，首先会调用`ziplistIndex`函数在底层压缩链表中定位到第一个元素的位置，然后循环调用 `zzlPrev`或者`zzlNext`来收集数据。
+2. 对于使用`OBJ_ENCODING_SKIPLIST`实现的有序集合，那么会通过`zslGetElementByRank`函数在底层的跳跃表之中定义到起始元素的位置，最后根据跳跃表的的性质，对跳跃表进行遍历，完成数据的收集。
+
 ### ZRANGEBYSCORE与ZREVRANGEBYSCORE命令
 
 除了基于排序的区间成员的获取命令，*Redis*还提供了两个基于分值的区间成员获取的命令**ZRANGEBYSCORE**以及**ZREVRANGEBYSCORE**命令：
@@ -307,6 +316,18 @@ void zrangebyscoreCommand(client *c);
 void zrevrangebyscoreCommand(client *c);
 ```
 
+函数`genericZrangebyscoreCommand`是用来实现上述命令的基础，这个函数首先会给定客户端输入的区间参数，初始化了`zrangespec`数据，根据前面介绍的四个函数：
+
+1. `zzlLastInRange`
+2. `zzlFirstInRange`
+3. `zslLastInRange`
+4. `zslFirstInRange`
+
+通过上面这个四个函数，*Redis*可以使用`zrangespec`在有序集合中查找属于区间的起始节点，进而通过遍历底层数据结构，收集数据，并通过下面这两个函数来判断是否完成收集：
+
+1. `zslValueGteMin`
+2. `zslValueLteMax`
+
 ### ZRANGEBYLEX与ZREVRANGEBYLEX命令
 
 最后*Redis*还提供了两个基于字典顺顺序获取有序集合区间成员数据的命令，**ZRANGEBYLEX**以及**ZREVRANGEBYLEX**这两个命令，这两个命令所操作的有序集合，其元素分值必须都是一致的。
@@ -325,6 +346,8 @@ void zrangebylexCommand(client *c);
 void zrevrangebylexCommand(client *c);
 ```
 
+**ZRANGEBYLEX**与**ZREVRANGEBYLEX**这两个命令，是使用`genericZrangebylexCommand`作为基础实现函数的，这个函数的逻辑基础与`genericZrangebyscoreCommand`类似，因此在这里不做过多的讲解。
+
 ### ZCOUNT命令
 
 *Redis*使用**ZCOUNT**命令来获取有序集合之中落于指定分值之间的成员的个数，这个命令的格式为：
@@ -334,6 +357,11 @@ void zrevrangebylexCommand(client *c);
 ```c
 void zcountCommand(client *c);
 ```
+
+`zcountCommand`这个函数会根据有序集合底层编码的不用选用不同的策略：
+
+1. `OBJ_ENCODING_ZIPLIST`，对于只用压缩链表实现有序集合，会首先调用`zzlFirstInRange`找到区间的起始成员，在按照遍历的方式，对落在范围区间内的成员进行计数。
+2. `OBJ_ENCODING_SKIPLIST`，对于采用跳跃表实现的有序集合，会调用`zslFirstInRange`以及`zslLastInRange`找到区间的第一个以及最后一个成员，然后通过`zslGetRank`来获取成团的排名值，通过两个排名值来计算区间内成员的个数。
 
 ### ZLEXCOUNT命令
 
@@ -345,6 +373,8 @@ void zcountCommand(client *c);
 void zlexcountCommand(client *c);
 ```
 
+`zlexcountCommand`这个函数在实现逻辑上与`zcountCommand`相似，不同之处在调用处理`zlexrangespec`的相关函数。
+
 ### ZCARD命令
 
 **ZCARD**命令用于获取给定的`key`所对应的成员个数，该命令的格式为：
@@ -354,6 +384,8 @@ void zlexcountCommand(client *c);
 ```c
 void zcardCommand(client *c);
 ```
+
+`zcardCommand`在实现**ZCARD**命令时，是通过调用`zsetLength`接口来实现的。
 
 ### ZSCORE命令
 
@@ -367,8 +399,10 @@ void zcardCommand(client *c);
 void zscoreCommand(client *c);
 ```
 
+`zscoreCommand`函数则是通过调用`zsetScore`函数来实现命令的功能的。
 
 ### ZRANK与ZREVRANK命令
+
 对于有序集合的排名操作，*Redis*给出了两个命令：
 1. **ZRANK**，这个命令用于获取获取元素按照分值递增顺序的排名，其格式为：
 
@@ -387,6 +421,8 @@ void zrankGenericCommand(client *c, int reverse);
 void zrankCommand(client *c);
 void zrevrankCommand(client *c);
 ```
+
+`zrankGenericCommand`是实现上述两个命令的基础，其内部是通过调用`zsetRank`这个接口来实现获取元素成员排名操作的。
 
 ### ZPOPMIN与ZPOPMAX命令
 
@@ -412,6 +448,8 @@ void zpopminCommand(client *c);
 void zpopmaxCommand(client *c);
 ```
 
+用于实现上述两个命令的函数`genericZpopCommand`，其内部逻辑是相对简单的，因为无论是使用压缩链表还是跳跃表实现的有序集合，其底层数据结构中成员数据的存储都是有序的，因此弹出操作只需要在有序集合的头部或者尾部按照个数弹出元素就可以。
+
 ### BZPOPMIN与BZPOPMAX命令
 
 对于上面的**ZPOPMIN**以及**ZPOPMAX**命令，*Redis*还提供了带有阻塞功能的版本：
@@ -426,6 +464,8 @@ void blockingGenericZpopCommand(client *c, int where);
 void bzpopminCommand(client *c);
 void bzpopmaxCommand(client *c);
 ```
+用于实现上述两个命令的函数`blockingGenericZpopCommand`在给定的有序集合非空时，会直接调用`genericZpopCommand`来将结果返回给客户端，而当所有的有序集合都为空的时候，则会用`blockForKeys`函数阻塞客户端的请求，直到其中一个有序集合非空或者超时为止。
+
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
 
