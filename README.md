@@ -26,11 +26,10 @@
 
 ## 数据库操作
 
-* 内存数据库基础操作
-* 过期策略
-* 淘汰策略
-* RDB数据备份
-* AOF数据备份
+* [内存数据库基础操作](dataManager/db.md)
+* [淘汰策略](dataManager/evict.md)
+* [RDB数据备份](dataManager/rdb.md)
+* [AOF数据备份](dataManager/aof.md)
 
 ## 网络IO接口
 * [套接字接口](network/anet.md)
