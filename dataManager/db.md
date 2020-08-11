@@ -27,7 +27,9 @@ typedef strcut redisDb
 2. `redisDb.expires`，这个字段也是一个哈希表类型，如果为数据库键空间中的某一个键设置了超时时间，那么会有一条记录存在这个哈希表中。
 3. `redisDd.id`，这个字段用于表示当前数据库的序号。
 
-在*Redis*中，服务器会存在多个数据库结构，定义在*Redis*服务器全局状态中：
+除了上述三个字段之外，对于该数据库结构体的其他字段的介绍将在后续的内容之中进行展开。
+
+在*Redis*中，服务器用于多个`redisDb`数据库，这些数据库被定义在*Redis*服务器全局状态中：
 
 ```c
 struct redisServer
@@ -39,7 +41,7 @@ struct redisServer
 };
 ```
 
-在这个数据结构之中，`redisServer.db`是一个存储所有数据库结构体`redisDb`的数组，而`redisServer.dbnum`用于存储对应数据库的个数。在*Redis*服务器的初始化函数中，会为这个数据库数组分配空间：
+在这个数据结构之中，`redisServer.db`是一个存储所有数据库结构体`redisDb`的数组，而`redisServer.dbnum`用于存储对应数据库数组的长度。在*Redis*服务器的初始化函数中，会为这个数据库数组分配空间：
 
 ```c
 void initServer(void) {
@@ -64,11 +66,17 @@ typedef struct client
 } client;
 ```
 
-在这个结构体中`client.db`表示当前这个客户端对应的数据库。
+在这个结构体中`client.db`会指向`redisServer.db`数组中的某一个`redisDb`数据库。
 
 ### 数据库键空间
 
-通过上面的简单介绍，我们可以看到，虽然在散列对象类型、集合对象类型、有序集合对象类型中，都会使用哈希表作为数据的底层实现方式，但是整个*Redis*还会维护数个大的哈希表，用于实现*key-value*的存储；而上述的五种的数据对象类型，则是作为*value*存储在数据库的大哈希表中的，而通过前面的对于数据对象类型的介绍，我们可以发现，*Redis*会使字符串对象类型来作为*value*所对应的*key*，用以在哈希表中实现对数据的快快速查找。
+通过上面的简单介绍，我们可以看到，虽然在散列对象类型、集合对象类型、有序集合对象类型中，都会使用哈希表作为数据的底层实现方式，但是整个*Redis*还会维护数个大的哈希表，用于实现*key-value*的存储；而上述的五种数据对象类型，则是作为*value*存储在数据库的大哈希表中的，而通过前面的对于数据对象类型的介绍，我们可以发现，*Redis*会使字符串对象类型来作为*value*所对应的*key*，用以在哈希表中实现对数据的快快速查找。
+
+例如，当我们执行如下的命令设置一个字符串时：
+
+    SET key:1 value:1
+
+这条命令会向*Redis*的键空间之中插入一个新的*key-value*，其中*key*是一个字符串对象`key:1`，这个*key*所对应的*value*也是一个字符串对象`value:1`。
 
 同时在前面讲解哈希表数据结构时的一个问题在此处也可以得到解释，便是：
 
@@ -100,6 +108,49 @@ static void _dictRehashStep(dict *d);
 上述对于键有效期的设定，都是将数据存储在数据库的`redisDb.expires`这个字段中，可以理解为`residDb.dict`中存储着*key-value*数据；而在`redisDb.expires`中则存储着*key-timestamp*数据。当我们针对键空间也就是`redisDb.dict`中的某一个*key*通过命令设定其有效期时，会通过一系列接口向`redisDb.expires`中插入对应的数据。
 
 ## 数据库的基础API
+
+### 数据库有效期相关接口
+```c
+void setExpire(client *c, redisDb *db, robj *key, long long when);
+long long getExpire(redisDb *db, robj *key);
+int removeExpire(redisDb *db, robj *key);
+void propagateExpire(redisDb *db, robj *key, int lazy);
+int expireIfNeeded(redisDb *db, robj *key);
+```
+*Redis*首先定义了一个接口用于为给定的*key*设定有效期：
+
+```c
+void setExpire(client *c, redisDb *db, robj *key, long long when);
+```
+这个函数会向一个已经存在于`redisDb.dict`中的`key`设定一个毫秒级的过期时间戳`when`，然后通过调用`dictAddOrFind`以及`dictSetSignedIntegerVal`这两个哈希表接口将这个`key`以及`when`插入到数据库的`redisDb.expires`字段之中。
+
+例如在字符串对象类型的**SET**命令的实现中：
+```c
+void setGenericCommand(client *c, int flags, robj *key, robj *val, robj *expire, int unit, robj *ok_reply, robj *abort_reply)
+{
+    ...
+    if (expire) setExpire(c,c->db,key,mstime()+milliseconds);
+    ...
+}
+```
+
+同时，*Redis*也定义了一个用于获取给定*key*的过期时间戳的接口：
+```c
+long long getExpire(redisDb *db, robj *key);
+```
+当这个给定的`key`没有一个关联的过期时间戳的话，这个函数会返回-1；否则这个函数会返回这个`key`对应的过期时间戳。
+
+通过上面`getExpire`这个函数接口获取到一个*key*的过期时间戳之后，*Reids*定义了用于检查一个*key*是否过期的接口：
+```c
+int keyIsExpired(redisDb *db, robj *key);
+```
+这个函数中集成三个判断*key*是否过期的逻辑。如果键过期，那么这个函数会返回1，没有过期或者没有设置过期时间则接口会返回0。
+
+如果我们不希望某一个*key*过期的话，*Redis*则是通过`removeExpire`这个接口来实现删除过期的逻辑的：
+```c
+int removeExpire(redisDb *db, robj *key);
+```
+这个函数会通过`dictDelete`函数，将`key`从`redisDb.expires`中删除。
 
 ### 数据库查找相关接口
 
@@ -149,47 +200,6 @@ int dbDelete(redisDb *db, robj *key);
 long long emptyDbGeneric(redisDb *dbarray, int dbnum, int flags, void(callback)(void*));
 ```
 
-### 数据库有效期相关接口
-```c
-void setExpire(client *c, redisDb *db, robj *key, long long when);
-long long getExpire(redisDb *db, robj *key);
-int removeExpire(redisDb *db, robj *key);
-void propagateExpire(redisDb *db, robj *key, int lazy);
-int expireIfNeeded(redisDb *db, robj *key);
-```
-*Redis*首先定义了一个用于为给定*key*设定有效期的接口：
-```c
-void setExpire(client *c, redisDb *db, robj *key, long long when);
-```
-这个函数会为`key`设定一个毫秒级的过期时间戳`when`，这个函数首先会从`redisDb.dict`中查找`key`，这也就意味着只能向一个存在于键空间之中键设置有效期，然后将这个`key`以及`when`插入到数据库的`redisDb.expires`字段之中。
-
-例如在字符串对象类型的**SET**命令的实现中：
-```c
-void setGenericCommand(client *c, int flags, robj *key, robj *val, robj *expire, int unit, robj *ok_reply, robj *abort_reply)
-{
-    ...
-    if (expire) setExpire(c,c->db,key,mstime()+milliseconds);
-    ...
-}
-```
-
-同时，*Redis*也定义了一个用于获取给定*key*的过期时间的接口：
-```c
-long long getExpire(redisDb *db, robj *key);
-```
-当这个给定的`key`没有一个关联的过期时间戳的话，这个函数会返回-1；否则这个函数会返回这个`key`对应的过期时间戳。
-
-通过上面`getExpire`这个函数接口，*Reids*定义了判断一个*key*是否过期的接口：
-```c
-int keyIsExpired(redisDb *db, robj *key);
-```
-如果键过期，那么这个函数会返回1，没有过期或者没有设置过期时间则接口会返回0。
-
-对于*key*对应过期时间的删除，则是通过`removeExpire`这个接口来实现的：
-```c
-int removeExpire(redisDb *db, robj *key);
-```
-这个函数会通过`dictDelete`函数，将`key`从`redisDb.expires`中删除。
 
 
 ****
