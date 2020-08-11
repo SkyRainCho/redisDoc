@@ -107,16 +107,6 @@ static void _dictRehashStep(dict *d);
 
 上述对于键有效期的设定，都是将数据存储在数据库的`redisDb.expires`这个字段中，可以理解为`residDb.dict`中存储着*key-value*数据；而在`redisDb.expires`中则存储着*key-timestamp*数据。当我们针对键空间也就是`redisDb.dict`中的某一个*key*通过命令设定其有效期时，会通过一系列接口向`redisDb.expires`中插入对应的数据。
 
-## 数据库的基础API
-
-### 数据库有效期相关接口
-```c
-void setExpire(client *c, redisDb *db, robj *key, long long when);
-long long getExpire(redisDb *db, robj *key);
-int removeExpire(redisDb *db, robj *key);
-void propagateExpire(redisDb *db, robj *key, int lazy);
-int expireIfNeeded(redisDb *db, robj *key);
-```
 *Redis*首先定义了一个接口用于为给定的*key*设定有效期：
 
 ```c
@@ -134,7 +124,7 @@ void setGenericCommand(client *c, int flags, robj *key, robj *val, robj *expire,
 }
 ```
 
-同时，*Redis*也定义了一个用于获取给定*key*的过期时间戳的接口：
+对于一个给定的*key*，我们可以使用下面这个`getExpire`接口来查询其对应的过期时间戳：
 ```c
 long long getExpire(redisDb *db, robj *key);
 ```
@@ -144,7 +134,51 @@ long long getExpire(redisDb *db, robj *key);
 ```c
 int keyIsExpired(redisDb *db, robj *key);
 ```
-这个函数中集成三个判断*key*是否过期的逻辑。如果键过期，那么这个函数会返回1，没有过期或者没有设置过期时间则接口会返回0。
+这个函数中集成三个判断*key*是否过期的逻辑。如果键过期，那么这个函数会返回1，没有过期或者没有设置过期时间则接口会返回0。不过需要注意的是，这个接口仅仅用于判断*key*是否过期，对于一个已经过期的*key*的处理，则需要用到下面的两个接口：
+```c
+void propagateExpire();
+int expireIfNeeded(redisDb *db, robj *key);
+```
+简单来说，通过调用`expireIfNeeded`这个接口，可以讲一个已经过期的*key*从*Redis*的键空间之中删除，当我们使用查找函数从键空间中查找对应的*key*时，会先调用`expireIfNeeded`这个接口，尝试对过期的*key*进行删除，然后在从键空间中进行查找，例如键空间的查找接口`lookupKeyReadWithFlags`：
+```c
+robj *lookupKeyReadWithFlags(redisDb *db, robj *key, int flags)
+{
+    if (expireIfNeeded(db, key) == 1)
+    {
+        ...
+    }
+    val = lookupKey(db, key, flags);
+    ...
+
+    return val;
+}
+```
+如果要从更细节的层面来讨论这个`expireIfNeeded`接口时，我们需要考虑两个问题：
+1. 过期*key*的删除策略
+2. 处理*Redis*主从模式的过期策略 
+
+#### 过期删除策略
+*Redis*给出了一种名为**惰性删除**的策略，应用**惰性删除**策略，如果删除一个*key*时，其对应的*value*不会立即被释放，而是被加入到惰性删除队列，以异步的形式被释放，与之相反的，如果服务器采用**非惰性删除**策略，那么在删除一个*key*时，其对应的*value*会立即同步地被释放删除。这个策略的开关被定义在`redisServer`这个全局状态结构体之中：
+```c
+struct redisServer
+{
+    ...
+    /* Lazy free */
+    int lazyfree_lazy_eviction;
+    int lazyfree_lazy_expire;
+    int lazyfree_lazy_server_del;
+    int lazyfree_lazy_user_del;
+    ...
+};
+```
+以上的四个策略开关的含义为：
+1. `redisServer.lazyfree_lazy_eviction`，是否在淘汰某个*key*时，使用**惰性删除**策略。
+2. `redisServer.lazyfree_lazy_expire`，是否在过期某个*key*时，使用**惰性删除**策略。
+3. `redisServer.lazyfree_lazy_server_del`，服务器端删除某个*key*时，是否使用**惰性删除**策略。
+4. `redisServer.lazyfree_lazy_user_del`，客户端通过命令删除某个*key*时，是否使用**惰性删除**策略。  
+
+## 数据库的基础API
+
 
 如果我们不希望某一个*key*过期的话，*Redis*则是通过`removeExpire`这个接口来实现删除过期的逻辑的：
 ```c
