@@ -48,6 +48,32 @@ static pthread_t bio_threads[BIO_NUM_OPS];
 ```
 
 
+
+*Redis*在完成对线程池以及任务队列的声明和定义之后，还定义后台操作的相关接口，这些接口的实现逻辑普遍比较简单，但是通过阅读代码可以发现*Redis*在*src/bio.c*源代码中给出关于线程池与任务队列以及**生产者-消费者**模式的一个经典实现范式。
+
+## 任务队列与线程池的初始化
+
+通过`bioInit`这个函数接口对任务队列进行初始化，同时启动线程池。
+
+```c
+void bioInit(void){
+    
+}
+```
+
+
+
+## 后台线程的函数入口
+
+通过上面`bioInit`这个接口，我们可以发现，*Redis*是使用`bioProcessBackgroundJobs`这个函数作为入口，通过`pthread_create`系统调用来启动线程池中的线程的，可以说这个函数便是整个后台I/O服务的核心，也是在**生产者-消费者**模式中扮演**消费者**的角色。
+
+## 添加后台任务接口
+
+## 后台线程的终止
+
+
+
+
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
 
