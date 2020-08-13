@@ -158,24 +158,8 @@ robj *lookupKeyReadWithFlags(redisDb *db, robj *key, int flags)
 2. 处理*Redis*主从模式的过期策略 
 
 #### 过期删除策略
-*Redis*给出了一种名为**惰性删除**的策略，应用**惰性删除**策略，如果删除一个*key*时，其对应的*value*不会立即被释放，而是被加入到惰性删除队列，以异步的形式被释放，与之相反的，如果服务器采用**非惰性删除**策略，那么在删除一个*key*时，其对应的*value*会立即同步地被释放删除。这个策略的开关被定义在`redisServer`这个全局状态结构体之中：
-```c
-struct redisServer
-{
-    ...
-    /* Lazy free */
-    int lazyfree_lazy_eviction;
-    int lazyfree_lazy_expire;
-    int lazyfree_lazy_server_del;
-    int lazyfree_lazy_user_del;
-    ...
-};
-```
-以上的四个策略开关的含义为：
-1. `redisServer.lazyfree_lazy_eviction`，是否在淘汰某个*key*时，使用**惰性删除**策略。
-2. `redisServer.lazyfree_lazy_expire`，是否在过期某个*key*时，使用**惰性删除**策略。
-3. `redisServer.lazyfree_lazy_server_del`，服务器端删除某个*key*时，是否使用**惰性删除**策略。
-4. `redisServer.lazyfree_lazy_user_del`，客户端通过命令删除某个*key*时，是否使用**惰性删除**策略。  
+*Redis*给出了一种名为**惰性删除**的策略，应用**惰性删除**策略，如果删除一个*key*时，其对应的*value*不会立即被释放，而是被加入到惰性删除队列，以异步的形式被释放，与之相反的，如果服务器采用**非惰性删除**策略，那么在删除一个*key*时，其对应的*value*会立即同步地被释放删除。
+  
 
 ## 数据库的基础API
 
