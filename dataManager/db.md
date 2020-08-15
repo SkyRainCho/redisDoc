@@ -24,10 +24,10 @@ typedef strcut redisDb
 以上这个结构体便是*Redis*中对内存数据库的描述，在这个数据结构之中：
 
 1. `redisDb.dict`，该字段是一个哈希表类型，用于维护这个数据库的键空间，前面我们讲解的五种数据对象类型，都按照*key-value*的形式存储在这个哈希表中。
-2. `redisDb.expires`，这个字段也是一个哈希表类型，如果为数据库键空间中的某一个键设置了超时时间，那么会有一条记录存在这个哈希表中。
+2. `redisDb.expires`，这个字段也是一个哈希表类型，如果为数据库键空间中的某一个键设置了过期时间，那么会有一条记录存在这个哈希表中。
 3. `redisDd.id`，这个字段用于表示当前数据库的序号。
 
-除了上述三个字段之外，对于该数据库结构体的其他字段的介绍将在后续的内容之中进行展开。
+对于*Redis*数据库来说，最为核心的便是`redisDb.dict`以及`redisDb.expires`这两个大的哈希表结构，除了上述三个字段之外，对于该数据库结构体的其他字段的介绍将在后续的内容之中进行展开。
 
 在*Redis*中，服务器用于多个`redisDb`数据库，这些数据库被定义在*Redis*服务器全局状态中：
 
@@ -97,15 +97,7 @@ static void _dictRehashStep(dict *d);
 
 ### 键的有效期
 
-在*Redis*之中，有些命令可以通过携带参数的方式为一个*key*设定其有效期，例如在**SET**命令中，可以通过*expiraion*这个参数，为给定的*key*设定有效时间；或者通过类似**EXPIRE**以及**EXPIREAT**这样的命令，为一个给定的*key*来设定其有效期：
-1. **EXPIRE**，这个命令的格式为
-    `EXPIRE key seconds`
-    这个命令会为给定的*key*设置一个秒级别的有效期。
-2. **EXPIREAT**，这个命令的格式为
-    `EXPIREAT key timestamp`
-    这个命令会为给定的*key*s设置一个UNIX时间戳形式有效期截止时间。
 
-上述对于键有效期的设定，都是将数据存储在数据库的`redisDb.expires`这个字段中，可以理解为`residDb.dict`中存储着*key-value*数据；而在`redisDb.expires`中则存储着*key-timestamp*数据。当我们针对键空间也就是`redisDb.dict`中的某一个*key*通过命令设定其有效期时，会通过一系列接口向`redisDb.expires`中插入对应的数据。
 
 *Redis*首先定义了一个接口用于为给定的*key*设定有效期：
 
@@ -131,10 +123,7 @@ long long getExpire(redisDb *db, robj *key);
 当这个给定的`key`没有一个关联的过期时间戳的话，这个函数会返回-1；否则这个函数会返回这个`key`对应的过期时间戳。
 
 通过上面`getExpire`这个函数接口获取到一个*key*的过期时间戳之后，*Reids*定义了用于检查一个*key*是否过期的接口：
-```c
-int keyIsExpired(redisDb *db, robj *key);
-```
-这个函数中集成三个判断*key*是否过期的逻辑。如果键过期，那么这个函数会返回1，没有过期或者没有设置过期时间则接口会返回0。不过需要注意的是，这个接口仅仅用于判断*key*是否过期，对于一个已经过期的*key*的处理，则需要用到下面的两个接口：
+对于一个已经过期的*key*的处理，则需要用到下面的两个接口：
 ```c
 void propagateExpire();
 int expireIfNeeded(redisDb *db, robj *key);
