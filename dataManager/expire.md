@@ -35,6 +35,12 @@ long long getExpire(redisDb *db, robj *key);
 ```
 当这个给定的`key`没有一个关联的过期时间戳的话，这个函数会返回-1；否则这个函数会返回这个`key`对应的过期时间戳。
 
+如果我们不希望某一个*key*过期的话，*Redis*则是通过`removeExpire`这个接口来实现删除过期的逻辑的：
+```c
+int removeExpire(redisDb *db, robj *key);
+```
+这个函数会通过`dictDelete`函数，将`key`从`redisDb.expires`中删除。
+
 ## 过期键的清理策略
 前面我们已经了解了如何设置以及获取一个*key*的过期时间，那么对于一个已经过期的*key*，*Redis*是如何将其删除的呢？本小节将就这个问题作出详细的解释。
 
@@ -107,7 +113,7 @@ int expireIfNeeded(redisDb *db, robj *key)
 ```
 在这个函数中，我们可以注意到：
 1. 在*Slave*实例中，虽然不会主动删除已经过期的*key*，但是这个函数还是会返回1，通知调用者，这个给定的*key*已经过期，保持与*Master*实例上行为一致的操作。
-2. *Redis*通过一个全局的开关`redisServer.lazyfree_lazy_expire`来决定对过期*key*的删除是采用同步的方式还是异步的方式。对于异步的删除方式，会在后续的内容之中进行介绍。但是不论是哪种删除方式，对于客户端来说都是透明的，*key*会立即从数据库的键空间之中被移除。
+2. *Redis*通过一个全局的开关`redisServer.lazyfree_lazy_expire`来决定对过期*key*的删除是采用同步的方式还是异步的方式。对于异步的删除方式**惰性删除**，会在后续的内容之中进行介绍。但是不论是哪种删除方式，对于客户端来说都是透明的，*key*会立即从数据库的键空间之中被移除。
 
 `expireIfNeeded`这个接口主要是在键空间针对某一个给定的`key`执行查找操作时背调用，例如`lookupKey*`这一系列函数之中，用以实现一种在对*key*的访问过程之中进行清理的逻辑。
 

@@ -95,44 +95,6 @@ static void _dictRehashStep(dict *d);
 - `dictRehashMilliseconds`，这个函数是在系统的心跳中被主动调用，处理的也是`redisDb.dict`这个大的哈希表。
 - `_dictRehashStep`，这个函数则是在针对某一个哈希表进行操作做时被动调用，这个函数重哈希的对象则是作为*value*存储在`redisDb.dict`中的散列对象、集合对象、有序集合对象这种对象数据底层的哈希表。
 
-### 键的有效期
-
-通过上面`getExpire`这个函数接口获取到一个*key*的过期时间戳之后，*Reids*定义了用于检查一个*key*是否过期的接口：
-对于一个已经过期的*key*的处理，则需要用到下面的两个接口：
-```c
-void propagateExpire();
-int expireIfNeeded(redisDb *db, robj *key);
-```
-简单来说，通过调用`expireIfNeeded`这个接口，可以讲一个已经过期的*key*从*Redis*的键空间之中删除，当我们使用查找函数从键空间中查找对应的*key*时，会先调用`expireIfNeeded`这个接口，尝试对过期的*key*进行删除，然后在从键空间中进行查找，例如键空间的查找接口`lookupKeyReadWithFlags`：
-```c
-robj *lookupKeyReadWithFlags(redisDb *db, robj *key, int flags)
-{
-    if (expireIfNeeded(db, key) == 1)
-    {
-        ...
-    }
-    val = lookupKey(db, key, flags);
-    ...
-
-    return val;
-}
-```
-如果要从更细节的层面来讨论这个`expireIfNeeded`接口时，我们需要考虑两个问题：
-1. 过期*key*的删除策略
-2. 处理*Redis*主从模式的过期策略 
-
-#### 过期删除策略
-*Redis*给出了一种名为**惰性删除**的策略，应用**惰性删除**策略，如果删除一个*key*时，其对应的*value*不会立即被释放，而是被加入到惰性删除队列，以异步的形式被释放，与之相反的，如果服务器采用**非惰性删除**策略，那么在删除一个*key*时，其对应的*value*会立即同步地被释放删除。
-  
-
-## 数据库的基础API
-
-
-如果我们不希望某一个*key*过期的话，*Redis*则是通过`removeExpire`这个接口来实现删除过期的逻辑的：
-```c
-int removeExpire(redisDb *db, robj *key);
-```
-这个函数会通过`dictDelete`函数，将`key`从`redisDb.expires`中删除。
 
 ### 数据库查找相关接口
 
