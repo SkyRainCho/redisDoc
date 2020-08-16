@@ -225,6 +225,8 @@ void persistCommand(client *c);
 ```
 该函数内部会通过调用`removeExpire`接口，将*key*从`redisDb.expires`哈希表中删除，使之成为成为永久存在的*key*。
 
+***
+
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
 
 喜欢的同学可以扫描二维码，关注我的微信公众号，*马基雅维利incoding*
