@@ -97,31 +97,6 @@ static void _dictRehashStep(dict *d);
 
 ### 键的有效期
 
-
-
-*Redis*首先定义了一个接口用于为给定的*key*设定有效期：
-
-```c
-void setExpire(client *c, redisDb *db, robj *key, long long when);
-```
-这个函数会向一个已经存在于`redisDb.dict`中的`key`设定一个毫秒级的过期时间戳`when`，然后通过调用`dictAddOrFind`以及`dictSetSignedIntegerVal`这两个哈希表接口将这个`key`以及`when`插入到数据库的`redisDb.expires`字段之中。
-
-例如在字符串对象类型的**SET**命令的实现中：
-```c
-void setGenericCommand(client *c, int flags, robj *key, robj *val, robj *expire, int unit, robj *ok_reply, robj *abort_reply)
-{
-    ...
-    if (expire) setExpire(c,c->db,key,mstime()+milliseconds);
-    ...
-}
-```
-
-对于一个给定的*key*，我们可以使用下面这个`getExpire`接口来查询其对应的过期时间戳：
-```c
-long long getExpire(redisDb *db, robj *key);
-```
-当这个给定的`key`没有一个关联的过期时间戳的话，这个函数会返回-1；否则这个函数会返回这个`key`对应的过期时间戳。
-
 通过上面`getExpire`这个函数接口获取到一个*key*的过期时间戳之后，*Reids*定义了用于检查一个*key*是否过期的接口：
 对于一个已经过期的*key*的处理，则需要用到下面的两个接口：
 ```c

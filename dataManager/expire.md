@@ -13,6 +13,27 @@
 上述对于键有效期的设定，都是将数据存储在数据库的`redisDb.expires`这个字段中，可以理解为键空间`residDb.dict`中存储着*key-value*数据；而在`redisDb.expires`中则存储着*key-timestamp*数据。当我们针对键空间也就是`redisDb.dict`中的某一个*key*通过命令设定其有效期时，会通过一系列接口向`redisDb.expires`中插入对应的数据。
 
 ## 过期时间的存取
+*Redis*首先定义了一个接口用于为给定的*key*设定有效期：
+```c
+void setExpire(client *c, redisDb *db, robj *key, long long when);
+```
+这个函数会向一个已经存在于`redisDb.dict`中的`key`设定一个毫秒级的过期时间戳`when`，然后通过调用`dictAddOrFind`以及`dictSetSignedIntegerVal`这两个哈希表接口将这个`key`以及`when`插入到数据库的`redisDb.expires`字段之中。
+
+例如在字符串对象类型的**SET**命令的实现中：
+```c
+void setGenericCommand(client *c, int flags, robj *key, robj *val, robj *expire, int unit, robj *ok_reply, robj *abort_reply)
+{
+    ...
+    if (expire) setExpire(c,c->db,key,mstime()+milliseconds);
+    ...
+}
+```
+
+对于一个给定的*key*，我们可以使用下面这个`getExpire`接口来查询其对应的过期时间戳：
+```c
+long long getExpire(redisDb *db, robj *key);
+```
+当这个给定的`key`没有一个关联的过期时间戳的话，这个函数会返回-1；否则这个函数会返回这个`key`对应的过期时间戳。
 
 ## 过期键的清理策略
 前面我们已经了解了如何设置以及获取一个*key*的过期时间，那么对于一个已经过期的*key*，*Redis*是如何将其删除的呢？本小节将就这个问题作出详细的解释。
@@ -100,8 +121,104 @@ void activeExpireCycle(int type);
 
 首先我们便从`activeExpireCycleTryExpire`函数入手，其中`db`参数为当前我们选中的数据库，`de`对应的是存储在`redisDb.expires`中的*key-timestamp*数据，那么这个函数会针对当前时间的时间戳`now`，对给定的*key-timestamp*数据`de`进行过期清理，如果没有过期，那么这个函数会返回0，否则函数返回1。这个这个函数清理过期*key*的过程与`expireIfNeeded`类似，都包含了调用`propagateExpire`接口尝试将删除指令同步给*Slave*实例的步骤；以及根据服务器的开关在键空间中执行对*key*的同步或者异步删除的步骤。
 
+*Redis*有两种运行主动清理逻辑`activeExpireCycle`的方式：
+1. `ACTIVE_EXPIRE_CYCLE_FAST`，这种*快速*清理方式会运行不超过`EXPIRE_FAST_CYCLE_DURATION`毫秒对过期的*key*进行清理。*Redis*会在每次进入事件循环之前，调用这个类型类型的主动清理逻辑进行*快速*清理，同时保证在上一次*快速*清理之后`EXPIRE_FAST_CYCLE_DURATION`时间内，不会再次进行*快速*清理。
+2. `ACTIVE_EXPIRE_CYCLE_SLOW`，这种*慢速*清理方式时*Redis*中通用的普通清理模式，这种清理模式会在*Redis*的`databasesCron`中被调用，并且每次清理会占用一定百分比的`REDIS_HZ`时间，而这个百分比则是`ACTIVE_EXPIRE_CYCLE_SLOW_TIME_PERC`定义的。
 
+`activeExpireCycle`这个函数的逻辑我们可以通过其代码片段进行了解：
+```c
+void activeExpireCycle(int type)
+{
+    static unsigned int current_db = 0;
+    ...
+    for (j = 0; j < dbs_per_call && timelimit_exit == 0; j++)
+    {
+        int expired;
+        redisDb *db = server.db + (current_db % server.dbnum);
+        current_db++;
+        ...
+        do
+        {
+            ...
+            iteration++;
+            ...
+            expired = 0;
+            num = ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP;
+            while (num--)
+            {
+                ...
+                if ((de = dictGetRandomKey(db->expires)) == NULL) break;
+                ...
+                if (activeExpireCycleTryExpire(db,de,now)) expired++;
+                ...
+            }
+            if ((iteration & 0xf) == 0) {
+                elapsed = ustime()-start;
+                if (elapsed > timelimit) {
+                    timelimit_exit = 1;
+                    break;
+                }
+            }
+        } while (expired > ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP/4);    
+    }
+}
+```
+通过上面的代码片段，我们了解到这个主动清理函数的逻辑为：
+1. 该函数每次调用会依次处理*Redis*中16个数据库中的若干个，该函数的静态变量`current_db`来记录当前处理的数据库。下次调用该函数时，可以通过`current_db`这个变量接续上次调用继续遍历处理*Redis*中的数据库。
+2. 针对每一个被遍历的数据库，*Redis*则会采取每次通过`dictGetRandomKey`随机从数据库中取出`ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP`个*key*进行采样，并调用`activeExpireCycleTryExpire`接口检查是否过期。
+3. 每次采样`iteration`中，如果过期的*key*在整个的采样个数中占比不到25%的话，那么结束对这个数据库的检查与清理，进而检查下一个数据库。
+4. 每进行16次采样，会检查一次是否达到了时间上限，如果达到，设置`timelimit_exit`，结束整个遍历过程。
 ***
+
+## 过期时间相关命令
+前面已经介绍*Redis*对于*key*有效期的相关内容，下面我们来讲一下关于*key*有效期相关的*Redis*命令。
+
+### EXPIRE相关命令
+这一系列命令主要是用于为*key*设定一个有效期。这一系列命令又可以分为两个类型：
+1. 用于为*key*设定一个有效期时间段：
+
+    EXPIRE key seconds
+    PEXPIRE key milliseconds
+
+这两个命令分别用于为*key*设定一个秒级的有效持续时间以及一个毫秒级的有效持续时间。
+2. 用于为*key*设定一个有效期截至的时间点：
+    
+    EXPIREAT key time
+    PEXPIREAT key ms_time
+
+这两个命令分别用于为*key*设定一个有效期截至的秒级时间戳以及毫秒级时间戳。
+
+*Redis*使用下面这个函数接口来实现上述的四个命令：
+```c
+void expireGenericCommand(client *c, long long basetime, int unit)
+```
+不论是设置有效期时间段，还是过期的时间点，在*Redis*数据库的`redisDb.expires`中都是以毫秒级过期时间点进行存储的，并且通过去我们前面介绍的`setExpire`接口进行设置。
+
+### TTL相关命令
+*Redis*为查询给定*key*的有效期提供了两个命令，分布是**TTL**以及**PTTL**这两个命令，这两个命令的格式为：
+
+    TTL key
+    PTTL key
+
+对于一个不存在*key*，这两个命令会返回-2；如果这个*key*存在但是没有设置有效期，那么这两个命令会返回-1；对于一个存在且具有有效期的*key*，**TTL**命令会返回秒级有效时间，**PTTL**命令则会返回毫秒级剩余有效时间
+```c
+void ttlGenericCommand(client *c, int output_ms);
+void ttlCommand(client *c);
+void pttlCommand(client *c);
+```
+**TTL**以及**PTTL**这两个命令都是通过`ttlGenericCommand`这个函数实现的，该函数从`redisDb.expires`中查询给定*key*的有效期时间戳，再与当前时间相减计算*key*的剩余有效时间。
+
+### PERSIST命令
+*Redis*通过**PERSIST**移除一个*key*的有效期，使之永久存在于键空间之中，这个命令的格式为：
+
+    PERSIST key
+
+这个命令的实现函数为：
+```c
+void persistCommand(client *c);
+```
+该函数内部会通过调用`removeExpire`接口，将*key*从`redisDb.expires`哈希表中删除，使之成为成为永久存在的*key*。
+
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
 
 喜欢的同学可以扫描二维码，关注我的微信公众号，*马基雅维利incoding*
