@@ -68,7 +68,7 @@ typedef struct client
 
 在这个结构体中`client.db`会指向`redisServer.db`数组中的某一个`redisDb`数据库。
 
-### 数据库键空间
+## 数据库键空间
 
 通过上面的简单介绍，我们可以看到，虽然在散列对象类型、集合对象类型、有序集合对象类型中，都会使用哈希表作为数据的底层实现方式，但是整个*Redis*还会维护数个大的哈希表，用于实现*key-value*的存储；而上述的五种数据对象类型，则是作为*value*存储在数据库的大哈希表中的，而通过前面的对于数据对象类型的介绍，我们可以发现，*Redis*会使字符串对象类型来作为*value*所对应的*key*，用以在哈希表中实现对数据的快快速查找。
 
@@ -97,7 +97,6 @@ static void _dictRehashStep(dict *d);
 
 
 ### 数据库查找相关接口
-
 ```c
 robj *lookupKey(redisDb *db, robj *key, int flags);
 robj *lookupKeyReadWithFlags(redisDb *db, robj *key, int flags);
@@ -107,17 +106,9 @@ robj *lookupKeyWrite(redisDb *db, robj *key);
 robj *lookupKeyReadOrReply(client *c, robj *key, robj *reply);
 robj *lookupKeyWriteOrReply(client *c, robj *key, robj *reply);
 ```
-
-在这几个函数中，`lookupKey`是一个底层的查找接口，
-
-```c
-robj *lookupKey(redisDb *db, robj *key, int flags);
-```
-
-这个接口是一个非常底层的查找接口，其主要逻辑只有两个：
-
+在这几个函数中，`lookupKey`是一个底层的查找接口，其主要逻辑有两个：
 1. 通过调用`dictFind`函数以及`dictGetVal`函数，来从键空间之中查找到*key*对应的*value*。
-2. 在没有子进程进行*RDB*保存或者*AOF*重写时，这个函数会根据参数`flags`，更新*value*数据对象上用来表示**LRU**或者**LFU**数据字段`robj.lru`。
+2. 在没有子进程进行*RDB*保存以及*AOF*重写时，同时如果这个查找操作没有携带这个`LOOKUP_NOTOUCH`标记，这个函数会根据参数`flags`，更新*value*数据对象上用来表示**LRU**或者**LFU**数据字段`robj.lru`。
 
 ### 数据库插入相关接口
 
@@ -143,6 +134,54 @@ int dbSyncDelete(redisDb *db, robj *key);
 int dbDelete(redisDb *db, robj *key);
 long long emptyDbGeneric(redisDb *dbarray, int dbnum, int flags, void(callback)(void*));
 ```
+
+## 键空间操作命令
+### FLUSHDB与FLUSHALL命令
+*Redis*提供了两个用于清空数据库键空间命令**FLUSHDB**以及**FLUSHALL**，这两个命令的格式为：
+
+    FLUSHDB [ASYNC]
+    FLUSHALL [ASYNC]
+
+**FLUSHDB**命令用于清空当前客户端选中的数据库键空间；**FLUSHALL**命令用于清空所有数据库的键空间。默认这两个命令在清空键空间时，都是采用同步的方式对键空间进行清空，这也就意味着如果键空间过于庞大的时候，同步清空会长期阻塞主线程，因此这对于较大的键空间，可以通过给定参数`ASYNC`来进行一种异步的**惰性删除**的策略，应用这种**惰性删除**策略，*Redis*会通过一个后台线程来实现对被删除键空间哈希表的释放。无论是否采用**惰性删除**，命令执行后，对于客户端来说，键空间都是处于一种被清空的状态。
+```c
+int getFlushCommandFlags(client *c, int *flags);
+void flushdbCommand(client *c);
+void flushallCommand(client *c);
+```
+这三个函数用于实现**FLUSHDB**以及**FLUSHALL**这两个命令，其内部是通过键空间的`emptyDb`这个接口来实现的。
+
+### DEL与UNLINK命令
+**DEL**命令与**UNLINK**命令都是*Redis*提供的，用于从数据库键空间之中删除给定*key*的命令，这两个命令的格式为：
+    DEL key [key ...]
+    UNLINK key [key ...]
+
+上述的两个命令都可以接受多个*key*作为参数，并返回被删除*key*的个数。不过区别在于**DEL**命令使用的是同步的删除释放策略；而**UNLINK**命令则是与面携带`ASYNC`参数的**FLUSHDB**命令相似，采用异步的**惰性删除**策略，通过一个后台线程异步地对数据进行释放。
+```c
+void delGenericCommand(client *c, int lazy);
+void delCommand(client *c);
+void unlinkCommand(client *c);
+```
+
+
+### EXISTS命令
+
+### SELECT命令
+
+### RANDOMKEY命令
+
+### KEYS命令
+
+### DBSIZE命令
+
+### LASTSAVE命令
+
+### TYPE命令
+
+### RENAME命令
+
+### MOVE命令
+
+### SWAPDB命令
 
 
 
