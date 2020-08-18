@@ -35,6 +35,7 @@
 * [AOF数据备份](dataManager/aof.md)
 
 ## 网络IO接口
-* [套接字接口](network/anet.md)
-* [事件驱动](network/ae.md)
-* [同步IO](network/syncio.md)
+* [套接字接口](network&IO/anet.md)
+* [事件驱动](network&IO/ae.md)
+* [同步IO](network&IO/syncio.md)
+* [面向流的IO接口](network&IO/rio.md)
