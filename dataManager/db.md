@@ -108,32 +108,53 @@ robj *lookupKeyWriteOrReply(client *c, robj *key, robj *reply);
 ```
 在这几个函数中，`lookupKey`是一个底层的查找接口，其主要逻辑有两个：
 1. 通过调用`dictFind`函数以及`dictGetVal`函数，来从键空间之中查找到*key*对应的*value*。
-2. 在没有子进程进行*RDB*保存以及*AOF*重写时，同时如果这个查找操作没有携带这个`LOOKUP_NOTOUCH`标记，这个函数会根据参数`flags`，更新*value*数据对象上用来表示**LRU**或者**LFU**数据字段`robj.lru`。
+2. 这个函数会更新*value*数据对象上用来表示**LRU**或者**LFU**数据字段`robj.lru`，除非当前有后台的**AOF**或者**RDB**持久化，或者`flags`参数之中携带者`LOOKUP_NOTOUCH`标记。
 
-### 数据库插入相关接口
-
+通过`lookupKey`这个函数实现了两组查找操作，分别对应于对于*key*的读操作以及写操作，这两个操作的区别在于，针对读操作的查找，会根据结果更新系统的键空间的命中计数器以及未命中计数器，而对于写操作的查找则不会更新这两个计数器，这两个统计计数器被定义在`redisServer`数据结构之中：
 ```c
-void dbAdd(redisDb *db, robj *key, robj *val);
-int dbAddRDBLoad(redisDb *db, sds key, robj *val);
-void dbOverwrite(redisDb *db, robj *key, robj *val);
-void genericSetKey(client *c, redisDb *db, robj *key, robj *val, int keepttl, int signal);
-void setKey(client *c, redisDb *db, robj *key, robj *val);
+struct redisServer{
+    ...
+    long long stat_keyspace_hits;
+    long long stat_keyspace_misses;
+    ...
+};
 ```
 
-### 数据库查找相关接口
+### 数据库插入相关接口
+针对数据库键空间的插入操作，本质上都是通过调用哈希表的`dictAdd`接口实现的，
+```c
+void dbAdd(redisDb *db, robj *key, robj *val);
+void dbOverwrite(redisDb *db, robj *key, robj *val);
+```
+*Redis*提供了两个上述两个接口用于向数据库的键空间插入新的*key-value*，以及为覆盖已存在的*key*，通过这两个接口*Redis*定义了一个更高一级的接口用于实现键空间的插入（覆盖）操作：
+```c
+void setKey(client *c, redisDb *db, robj *key, robj *val);
+```
+这个接口会根据键是否存在于键空间之中选择调用`dbAdd`或者`dbOverwrite`这两个函数，同时如果是对已有的*key*进行覆盖，那么还会尝试移除它的有效期。
 
+### 数据库查找相关接口
 ```c
 int dbExists(redisDb *db, robj *key);
 robj *dbRandomKey(redisDb *db);
 ```
+函数`dbExists`通过`dictFind`接口来判断一个给定的*key*是否存在于键空间之中。
+
+而函数`dbRandomKey`则通过`dictGEtRandomKey`这个接口从键空间之中返回一个随机的*key*。
 
 ### 数据库删除相关接口
-
 ```c
 int dbSyncDelete(redisDb *db, robj *key);
 int dbDelete(redisDb *db, robj *key);
-long long emptyDbGeneric(redisDb *dbarray, int dbnum, int flags, void(callback)(void*));
 ```
+*Redis*定义了`dbSyncDelete`接口用于将一个*key*从键空间之中同步地删除并释放，显而易见*Redis*还定义了一个异步删除释放的接口`dbAsyncDelete`，这个接口被定义在*src/expire.c*之中，用于执行一种**惰性删除**的策略，对于这个策略的介绍会在后续的内容中进行讲解。是否执行**惰性删除**，*Redis*会根据`redisServer.lazyfree_lazy_server_del`这个开关进行控制。
+
+而`dbDelete`则是一个更高级的接口，它会根据服务器的开关，来决定使用`dbSyncDelete`还是`dbAsyncDelete`对*key*进行删除与释放。
+
+下面这个`emptyDb`接口则是*Redis*用于清空整个键空间的接口。
+```c
+long long emptyDb(int dbnum, int flags, void(callback)(void*));
+```
+当`dbnum`为-1的话，则是清空所有数据库的键空间，否侧则清空指定数据库；而`flags`标记则会控制*Redis*是采取同步清空的逻辑，还是采取基于**惰性删除**策略的异步逻辑。
 
 ## 键空间操作命令
 ### FLUSHDB与FLUSHALL命令
