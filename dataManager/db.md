@@ -161,29 +161,97 @@ void delGenericCommand(client *c, int lazy);
 void delCommand(client *c);
 void unlinkCommand(client *c);
 ```
-
+上面三个函数中`delGenericCommand`是整个删除逻辑的基础，需要注意的是在对某一个*key*执行删除操作前需要调用`expireIfNeeded`来尝试处于过期*key*，防止那些已过期的*key*污染返回的删除个数，因为被`expireIfNeeded`删除的*key*本质上是属于“已经被删除”的*key*。
 
 ### EXISTS命令
+**EXISTS**这个命令的格式为：
+    EXISTS key [key ...]
+
+该命令用于返回给定的*key*列表中存在于数据库键空间中的*key*的个数，该命令的实现函数为：
+```c
+void existsCommand(client *c);
+```
 
 ### SELECT命令
+**SELECT**命令的格式为：
+    SELECT index
+该命令的实现函数为：
+```c
+void selectCommand(client *);
+```
+这个命令通过调用数据库的`selectDb`接口，切换当前连接对应的客户端选择的数据库。
 
 ### RANDOMKEY命令
+**RANDOMKEY**这个命令用于从数据库的键空间之中随机返回一个*key*，该命令的格式为：
+    RANKDOMKEY
+
+这个命令对应的实现接口为：
+```c
+void randomkeyCommand(client *c);
+```
+这个函数会调用`dbRankdomKey`接口来获取一个随机的*key*。
 
 ### KEYS命令
+**KEYS**命令用于从数据库的键空间之中返回符合给定`pattern`的*key*的集合。该函数的格式为：
+    KEYS pattern
+
+这个命令对应的实现函数为：
+```c
+void keysCommand(client *c);
+```
+这个命令会遍历整个数据库的键空间来收集与`pattern`匹配的*key*来返回给客户端，主要注意的是，如果对于较大的键空间上调用的该命令，会对整个*Redis*的性能造成一定影响。
 
 ### DBSIZE命令
-
-### LASTSAVE命令
+**DBSIZE**这个命令用于获取键空间中*key*的个数，
+```c
+void dbsizeCommand(client *c);
+```
+`dbsizeCommand`这个函数会通过`dictSize`这个接口来获取键空间对应哈希表中元素的个数。
 
 ### TYPE命令
+**TYPE**命令用于获取给定*key*对应*value*的对象类型，该命令的格式为：
+    TYPE key
 
-### RENAME命令
+该命令的实现函数为：
+```c
+void typeCommand(client *c);
+```
+该函数会查找到*key*对应*value*的`robj`指针，通过`robj.type`来返回对象的类型。
+
+### RENAME系列命令
+这一系列命令有两个，**RENAME**以及**RENAMENX**，这两个命令的格式为：
+    RENAME key newkey
+    RENAMENX key newkey
+
+这两个命令的用于为将*key*更名为*newkey*，两个命令的区别在于，如果*newkey*存在，那么**RENAME**命令会将`newkey`这个对应的*key*覆盖掉；而**RENAMENX**命令只有在*newkey*不存在的情况下，才会重新命名成功。
+这两个命令的实现函数为：
+```c
+void renameGenericCommand(Client *c, int nx);
+void renameCommand(client *c);
+void renamenxCommand(clinet *c);
+```
+这两个命令的基础逻辑，从键空间中查找到*key*对应的*key-value*，将其从键空间中删除，并将新的*newkey-value*插入到键空间中。
 
 ### MOVE命令
+**MOVE**这个命令用于将给定的*key*从当前选中的键空间之中移动到另外一个键空间之中，该命令的格式为：
+    MOVE key db
+
+该命令的实现函数为：
+```c
+void moveCommand(client *c);
+```
+这个命令的基础逻辑为，将*key*从当前数据库键空间中取出，将其调用`dbAdd`接口加入到另外一个数据库的键空间之中。
 
 ### SWAPDB命令
+**SWAPDB**命令用于交换*Redis*中两个给定数据库的键空间，其格式为：
+    SWAPDB index index
 
-
+该命令的实现函数为：
+```c
+int dbSwapDatabases(int id1, int id2);
+void swapdbCommand(client *c);
+```
+其基础逻辑为交换两个数据库`redisDb`的成员指针内容，实现数据库键空间的快速交换。
 
 ****
 
