@@ -29,13 +29,20 @@
 * [内存数据库基础操作](dataManager/db.md)
 * [过期策略](dataManager/expire.md)
 * [惰性删除策略](dataManager/lazyfree.md)
-* [后台IO服务](dataManager/bio.md)
 * [淘汰策略](dataManager/evict.md)
 * [RDB数据备份](dataManager/rdb.md)
 * [AOF数据备份](dataManager/aof.md)
 
 ## 网络IO接口
+* [后台IO服务](dataManager/bio.md)
+* [面向流的IO接口](network&IO/rio.md)
 * [套接字接口](network&IO/anet.md)
 * [事件驱动](network&IO/ae.md)
 * [同步IO](network&IO/syncio.md)
-* [面向流的IO接口](network&IO/rio.md)
+
+## Redis服务器组件
+* [Redis服务器](redis/server.md)
+* [主从模式](redis/replication.md)
+* [哨兵模式](redis/sentinel.md)
+* [Redis集群](redis/cluster.md)
+
