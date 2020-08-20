@@ -114,6 +114,53 @@ int rioWriteBulkObject(rio *r, struct redisObject *obj);
 
 而函数`rioWriteBulkLongLong`以及`rioWriteBulkDouble`则是用于将一个整形数以及浮点数写入`rio`对象中，这两个函数的逻辑都是将数字转化为字符串的形式，然后调用`rioWriteBulkString`执行的写入逻辑。
 
+在介绍了`rio`通用接口之后，我们可以在*src/rio.c*源文件之中找到不同类型`rio`对象底层逻辑的实现细节，也就是为三种类型的`rio`对象定义了对应函数指针的实现细节：
+1. 缓存IO的实现：
+    ```c
+    static size_t rioBufferWrite(rio *r, const void *buf, size_t len);
+    static size_t rioBufferRead(rio *r, void *buf, size_t len);
+    static off_t rioBufferTell(rio *r);
+    static int rioBufferFlush(rio *r);
+    ```
+    
+2. 文件IO的实现：
+    ```c
+    static size_t rioFileWrite(rio *r, const void *buf, size_t len);
+    static size_t rioFileRead(rio *r, void *buf, size_t len);
+    static size_t rioFileTell(rio *r);
+    static size_t rioFileFlush(rio *r);
+    ```
+    
+3. 文件描述符IO的实现：
+    ```c
+    static size_t rioFdsetWrite(rio *r, const void *buf, size_t len);
+    static size_t rioFdsetRead(rio *r, void *buf, size_t len);
+    static size_t rioFdsetTell(rio *r);
+    static size_t rioFdsetFlush(rio *r);
+    ```
+
+
+上述的几个函数实现会在`rio`的初始化函数中被赋值给`rio`对应的函数指针。我们可以针对文件IO的`rioFileWrite`以及文件描述符IO的`rioFdsetWrite`来进行简单的介绍，透过这两个函数，我们可以了解到整个`rio`的底层实现细节。
+```c
+static size_t rioFileWrite(rio *r, const void *buf, size_t len) {
+    size_t retval;
+
+    retval = fwrite(buf,len,1,r->io.file.fp);
+    r->io.file.buffered += len;
+
+    if (r->io.file.autosync &&
+        r->io.file.buffered >= r->io.file.autosync)
+    {
+        fflush(r->io.file.fp);
+        redis_fsync(fileno(r->io.file.fp));
+        r->io.file.buffered = 0;
+    }
+    return retval;
+}
+```
+这个文件写入操作中，首先调用`fwrite`接口向文件写入数据，同时更新当前的缓存计数`rio.io.file.buffered`，需要注意的是，`fwrite`接口只是将数据写入的用户文件缓冲区，当`rio.io.file.buffered`达到上限时，会调用`fflush`将用户缓冲区的数据写入内核缓冲区，在通过`redis_fsync`将内核缓冲区的数据写入磁盘，并清空`rio.io.file.buffered`，这样便完成了对文件`rio`对象数据的写入过程。
+
+而针对文件描述符的写入操作`rioFdsetWrite`与`rioFileWrite`的逻辑类似，不同之处在于文件描述符类型的`rio`对象中，没有类似文件操作的用户缓冲区，而是自己定义了一个`sds`类型数据`rio.io.fdset.buf`作为内存缓冲区，每次尝试写入的数据被先放在内存缓冲区之中，待到刷新时，在将数据通过`write`系统调用，写入文件描述符集合，并清空`rio.io.fdset.buf`缓冲区。
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
