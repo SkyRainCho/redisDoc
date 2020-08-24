@@ -8,14 +8,14 @@
 1. 在*Redis*的内存到达上限时，不对*key*进行淘汰，而是禁止新的写入操作。
     `MAXMEMORY_NO_EVICTION`
 2. 在*Reids*的内存到达上限时，会从设置了过期时间的键中，也就是`redisDb.expires`中，选择*key*进行淘汰，选择*key*的策略有四种：
-    1. `MAXMEMORY_VOLATILE_LRU`，
-    2. `MAXMEMORY_VOLATILE_LFU`，
-    3. `MAXMEMORY_VOLATILE_TTL`，
-    4. `MAXMEMORY_VOLATILE_RANDOM`，
+    1. `MAXMEMORY_VOLATILE_LRU`，这种策略会使用近似的**LRU**策略，选择*key*进行淘汰。
+    2. `MAXMEMORY_VOLATILE_LFU`，这种策略会使用**LFU**策略，选择*key*进行淘汰。
+    3. `MAXMEMORY_VOLATILE_TTL`，这种策略会选择过期时间最早的*key*进行淘汰。
+    4. `MAXMEMORY_VOLATILE_RANDOM`，这种策略会从`redisDb.expires`的*key*中随机选择进行淘汰。
 3. 在*Redis*的内存到达上限时，会从整个数据库的键空间中，也就是`redisDb.dict`中，选择*key*进行淘汰，选择*key*的策略有三种：
-    1. `MAXMEMORY_ALLKEYS_LRU`，
-    2. `MAXMEMORY_ALLKEYS_LFU`，
-    3. `MAXMEMORY_ALLKEYS_RANDOM`，
+    1. `MAXMEMORY_ALLKEYS_LRU`，这种策略会使用近似的**LRU**策略，选择*key*进行淘汰。
+    2. `MAXMEMORY_ALLKEYS_LFU`，这种策略会使用**LFU**策略，选择*key*进行淘汰。
+    3. `MAXMEMORY_ALLKEYS_RANDOM`，这种策略会从`redisDb.dict`的*key*中随机选择进行淘汰。
 
 在代码层面，前面我们在介绍*Redis*对象时，曾经提过在`redisObject`对象中存在一个用于维护**LRU**数据或者**LFU**数据的字段，
 ```c
