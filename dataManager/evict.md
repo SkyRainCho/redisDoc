@@ -54,9 +54,118 @@ unsigned int getLRUClock(void);
 ```
 这个接口会通过系统调用`mstime()`来获取系统的毫秒时间戳，因为这个调用设计用户态和内核态之间的切换，因此频繁地直接调用会大大地降低系统的性能，因此*Redis*在服务器的全局数据之中定义了一个字段用户缓存当前的**LRU**时间戳跳数`redisServer.lruclock`，*Redis*会在系统事件循环的心跳`serverCron`之中调用`getLRUClock`接口，将跳数缓存下来。系统的频率由`redisServer.hz`来决定，默认是每秒钟10次。
 
+*Redis*给出了一个接口，用于更新*Redis*对象的`lru`数据信息：
+```c
+unsigned int LRU_CLOCK(void);
+```
+正常情况下，**LRU**跳数的频率为1000毫秒1次，而系统心跳则是1000毫秒10次，对于这种情况`LRU_CLOCK`函数会之中从`redisServer.lruclock`缓存中获取当前的**LRU**时间戳跳数；当然我们可以通过修改代码的方式提高**LRU**跳数的频率，并且可以通过配置降低系统心跳的频率，对于系统心跳频率低于**LRU**频率时，`redisServer.lruclock`缓存无法及时更新，对于这种情况，通过`getLRUClock`函数来获取时间戳跳数。
+
+最后，*Redis*定义了一个接口`estimateObjectIdleTime`，通过这个接口，我们可以计算出一个*Redis*对象没有被访问的空闲时间毫秒数。
+```c
+unsigned long long estimateObjectIdleTime(robj *o);
+```
+
 ## Redis中的LFU策略
+**LFU**策略又被称为最不经常使用策略，和**LRU**策略的区别在于：
+1. **LRU**认为只有一个数据最近被访问过，那么在未来其被访问的概率也就更高。
+2. **LFU**则认为一个数据在最近一段时间内被访问的次数越多，那么在未来其被访问的概率也就越高。
+
+与*Redis*中实现的**LRU**策略一样，*Redis*中的**LFU**策略同样是一个近似的**LFU**策略，而不是一个准确的**LFU**策略。同时在开启了**LFU**策略后，*Redis*会使用`redisServer.lruclock`来存储*Redis*对象的**LFU**信息。这个24位的`redisServer.lruclock`字段被划分为两个部分：
+
+         16 bits      8 bits
+    +----------------+--------+
+    + Last decr time | LOG_C  |
+    +----------------+--------+
+
+1. `LOG_C`，这个字段占用8个比特，是一个对数计数器，用于标记一个对象的访问频数，这个字段不但可以随着对数据的访问而增加，同时也可以随着时间递减，之所以这么处理，是为了防止过去很久一段时间曾经被大量访问的对象无法被淘汰。
+
+2. 剩余的16个比特用于存储一个递减的时间，由于只有16位，因此存储的是一个由Unix时间戳简化存储的分钟时间戳。
+
+键空间之中新建的对象，其对应的`LOG_C`计数器并非是从0开始的，这是为了防止一个新的对象立刻被*Redis*的淘汰机制给删除，初始的对象的计数器被设定为`COUNTER_INIT_VAL`，其定义为
+```c
+#define COUNTER_INIT_VAL 5
+```
+在代码中体现在创建*Redis*对象的函数接口`createObject`中：
+```c
+robj *createObject(int type, void *ptr) {
+    ...
+    if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
+        o->lru = (LFUGetTimeInMinutes()<<8) | LFU_INIT_VAL;
+    }
+    else
+    {
+        o->lru = LRU_CLOCK();
+    }
+}
+```
+
+对于*Redis*中的**LFU**策略，在*src/evict.c*文件中定义四个相关的函数接口。
+```c
+unsigned long LFUGetTimeInMinutes(void);
+```
+`LFUGetTimeInMinutes`这个函数用于获取16位的当前的基于Unix时间戳的分钟时间戳。
+
+```c
+unsigned long LFUTimeElapsed(unsigned long ldt);
+```
+`LFUTimeElapsed`这个接口与**LRU**策略中的`estimateObjectIdleTime`接口相同，用于计算对象上次访问时间戳距今的空闲时间。
+
+```c
+uint8_t LFULogIncr(uint8_t counter);
+```
+`LFULogIncr`这个接口用于对数地对计数器进行递增操作。这个接口会概率性地对计数器进行递增，简单来说`counter`的数值越高，`counter`计数器保持不变的概率就越大，同时`counter`的上限为255。
+
+```c
+unsigned long LFUDecrAndReturn(robj *o);
+```
+`LFUDecrAndReturn`这个接口用于对*Redis*对象的**LFU**计数器进行递减操作，*Redis*在全局数据中定义了一个**LFU**递减因子`redisServer.lfu_decay_time`，通过**LFU**空闲时间以及这个递减因子，我们可以完成对计数器的更新。
+
+在*src/db.c*源文件中，我们可以看到如何应用上述的几个函数来更新对象的**LRU**信息：
+```c
+void updateLFU(robj *val) {
+    unsigned long counter = LFUDecrAndReturn(val);
+    counter = LFULogIncr(counter);
+    val->lru = (LFUGetTimeInMinutes()<<8) | counter;
+}
+```
 
 ## Redis中的淘汰逻辑
+前面我们提到，*Redis*在对*key*进行淘汰时，采用的都是近似的**LRU**、**LFU**以及**TTL**等策略。也就是基于随机算法，通过采样来选择最佳的待淘汰*key*。因此*Redis*定义了一个辅助的数据结构，用以实现随机采样：
+```c
+#define EVPOOL_SIZE 16
+struct evictionPoolEntry {
+    unsigned long long idle;
+    sds key;
+    sds cached;
+    int dbid;
+};
+static struct evictionPoolEntry *EvictionPoolLRU;
+```
+通过`evictionPoolAlloc`这个接口，*Redis*会为这个**淘汰池**分配内存并进行初始化。
+
+对于*key*的淘汰，*Redis*只会在设置了内存上限，并且所使用的内存已经达到上限时才会进行。在服务器的全局数据之中定义了数据库可以使用的内存上限`redisServer.maxmemory`，如果这个值被设置成0，那么意味着数据没有内存上限，因此这种情况将不会触发淘汰机制。
+
+对于设置了内存上限的情况，*Redis*定义了两个函数用于统计内存使用，判断是否当前需要进行淘汰：
+```c
+size_t freeMemoryGetNotCountedMemory(void);
+int getMaxmemoryState(size_t *total, size_t *logical, size_t *tofree, float *level);
+```
+
+对于**AOF**所使用的内存缓存，以及主从模式下**Slave**的输出缓存所使用的内存，*Redis*不希望将其记录在内存统计之内，因此*Redis*需要通过`freeMemoryGetNotCountedMemory`这个接口来获取上述这部分缓存所使用的内存，将总的内存用量减去上述这部分内存，便获得实际需要被统计的内存使用量。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ****
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
