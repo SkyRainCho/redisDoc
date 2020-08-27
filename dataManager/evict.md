@@ -166,29 +166,32 @@ int getMaxmemoryState(size_t *total, size_t *logical, size_t *tofree, float *lev
 int freeMemoryIfNeeded(void);
 ```
 
-*Redis*会在每次执行客户端发来的命令前执行该函数，尝试对*key*进行淘汰。同时*Redis*还定义了一个辅助函数，收集合适的*key*，将其相关的数据填充到`EvictionPoolLRU`这个**淘汰池**中：
-
+*Redis*会在每次执行客户端发来的命令前执行该函数，尝试对*key*进行淘汰。在了解这个函数的实现之前，我们首先看一个辅助函数`evictionPoolPopulate`，收集合适的*key*，将相关的数据填充到`EvictionPoolLRU`这个**淘汰池**中：
 ```c
 void evictionPoolPopulate(int dbid, dict *sampledict, dict *keydict, struct evictionPoolEntry *pool);
 ```
-
-
-
-在服务器的全局数据之中，*Redis*定义了关于淘汰机制的一些参数：
-
-1. `redisServer.maxmemory_samples`，这个参数定义了
-
-
-
-
-
-
-
-
-
-
-
-
+`evictionPoolPopulate`这个接口，用于从给定编号`dbid`数据库的待采样哈希表`sampledict`中进行采样，如果当前系统采用的是**LRU**策略，那么这个待采样哈希表就是`redisDb.expires`；否则的话便采用数据库的键空间`redisDb.dict`作为待采样数据集。每次调用该接口会从待采样数据集中通过`dictGetSomeKeys`接口最多采集`redisServer.maxmemory_samples`个样本，**淘汰池**中的数据按照闲置时间的升序方式进行排序，不同策略的闲置时间的获取方式如下面的代码片段所示：
+```c
+void evictionPoolPopulate(int dbid, dict *sampledict, dict *keydict, struct evictionPoolEntry *pool) {
+    ...
+        if (server.maxmemory_policy & MAXMEMORY_FLAG_LRU) {
+            idle = estimateObjectIdleTime(o);
+        }
+        else if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
+            idle = 255-LFUDecrAndReturn(o);
+        }
+        else if (server.maxmemory_policy == MAXMEMORY_VOLATILE_TTL) {
+            idle = ULLONG_MAX - (long)dictGetVal(de);
+        }
+    ...
+}
+```
+有了这个`evictionPoolPopulate`辅助函数，我们就可以来看看`freeMemoryIfNeeded`的实现细节了，这个函数的基本逻辑可以由下面几点进行简单的描述：
+1. 通过调用`getMaxmemoryState`获得当前系统的内存使用信息。
+2. 如果需要执行淘汰策略回收内存，那么记录需要被释放的内存数量`mem_tofree`。
+3. 对*Redis*的每一个数据库调用`evictionPoolPopulate`进行采样，这样一来，**淘汰池**中变记录了当前一轮采样中最**闲置**的一组数据。
+4. 从这一组**闲置**数据之中，选择最为**闲置**的哪一个数据进行淘汰。
+5. 如果淘汰数据释放的内存满足`mem_tofree`，那么结束淘汰流程，否侧重复步骤2，3。
 
 ****
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
