@@ -153,7 +153,30 @@ int getMaxmemoryState(size_t *total, size_t *logical, size_t *tofree, float *lev
 
 对于**AOF**所使用的内存缓存，以及主从模式下**Slave**的输出缓存所使用的内存，*Redis*不希望将其记录在内存统计之内，因此*Redis*需要通过`freeMemoryGetNotCountedMemory`这个接口来获取上述这部分缓存所使用的内存，将总的内存用量减去上述这部分内存，便获得实际需要被统计的内存使用量。
 
+而通过`getMaxmemoryState`接口，我们可以判断当前*Redis*服务器的内存使用状态，进而判断是否需要启动淘汰机制，如果该函数返回`C_OK`表明当前内存使用量没有达到上限，无需进行淘汰；反之如果函数返回`C_ERR`则表明当前内存使用量已经达到上限，需要启动淘汰机制。在函数返回`C_ERR`时，通过函数传入的指针参数还可以获得当前*Redis*内存使用的具体数据：
 
+1. `total`，通过该字段可以返回当前*Redis*使用的总内存数量。
+2. `logical`，这个参数会返回*Redis*使用的逻辑内存，也就是`total`的内存减去`freeMemoryGetNotCountedMemory`之后的数量。
+3. `tofree`，这个参数会返回*Redis*需要被释放的内存数量。
+4. `level`，这个参数会返回当前内存的使用率，即`logical`/`redisServer.maxmemory`的结果。
+
+而*Redis*淘汰机制的核心是通过`freeMemoryIfNeeded`这个接口来实现的：
+
+```c
+int freeMemoryIfNeeded(void);
+```
+
+*Redis*会在每次执行客户端发来的命令前执行该函数，尝试对*key*进行淘汰。同时*Redis*还定义了一个辅助函数，收集合适的*key*，将其相关的数据填充到`EvictionPoolLRU`这个**淘汰池**中：
+
+```c
+void evictionPoolPopulate(int dbid, dict *sampledict, dict *keydict, struct evictionPoolEntry *pool);
+```
+
+
+
+在服务器的全局数据之中，*Redis*定义了关于淘汰机制的一些参数：
+
+1. `redisServer.maxmemory_samples`，这个参数定义了
 
 
 
