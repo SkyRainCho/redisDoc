@@ -28,7 +28,7 @@
 
 * [内存数据库基础操作](dataManager/db.md)
 * [过期策略](dataManager/expire.md)
-* [惰性删除策略](dataManager/lazyfree.md)
+* [惰性释放策略](dataManager/lazyfree.md)
 * [淘汰策略](dataManager/evict.md)
 * [RDB数据备份](dataManager/rdb.md)
 * [AOF数据备份](dataManager/aof.md)

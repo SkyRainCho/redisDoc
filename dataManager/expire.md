@@ -93,7 +93,7 @@ int keyIsExpired(redisDb *db, robj *key) {
 ```
 在上面这个函数中，最重要的一段逻辑便是如何确认`now`这个当前时间，对于当前时间的确认，*Redis*给出了三个中情况：
 1. 如果在一个Lua脚本的上下文中，那么我们将执行Lua脚本的起始时间作为`now`的时间戳。
-2. 如果在一个命令的执行过程之中，我们将执行明见的起始时间作为`now`。
+2. 如果在一个命令的执行过程之中，我们将执行命令的起始时间作为`now`。
 3. 其他情况，便是使用当前的实际时间来作为`now`，
 
 `keyIsExpired`这个接口只会用于判断一个给定的*key*是否过期，而不会关系如何处理一个过期的*key*。对于如何处理一个已经过期的*key*，则需要使用下面这个`expireifNeeded`接口来处理，现在我们来看一下这个函数接口的实现细节：
@@ -113,9 +113,9 @@ int expireIfNeeded(redisDb *db, robj *key)
 ```
 在这个函数中，我们可以注意到：
 1. 在*Slave*实例中，虽然不会主动删除已经过期的*key*，但是这个函数还是会返回1，通知调用者，这个给定的*key*已经过期，保持与*Master*实例上行为一致的操作。
-2. *Redis*通过一个全局的开关`redisServer.lazyfree_lazy_expire`来决定对过期*key*的删除是采用同步的方式还是异步的方式。对于异步的删除方式**惰性删除**，会在后续的内容之中进行介绍。但是不论是哪种删除方式，对于客户端来说都是透明的，*key*会立即从数据库的键空间之中被移除。
+2. *Redis*通过一个全局的开关`redisServer.lazyfree_lazy_expire`来决定对过期*key*的删除是采用同步的方式还是异步的方式。对于异步的删除方式**惰性释放**，会在后续的内容之中进行介绍。但是不论是哪种删除方式，对于客户端来说都是透明的，*key*会立即从数据库的键空间之中被移除。
 
-`expireIfNeeded`这个接口主要是在键空间针对某一个给定的`key`执行查找操作时背调用，例如`lookupKey*`这一系列函数之中，用以实现一种在对*key*的访问过程之中进行清理的逻辑。
+`expireIfNeeded`这个接口主要是在键空间针对某一个给定的`key`执行查找操作时被调用，例如`lookupKey*`这一系列函数之中，用以实现一种在对*key*的访问过程之中进行清理的逻辑。
 
 ### 主动定时批量清理
 *Redis*对过期*key*的主动清理策略的接口被定义在*src/expire.c*源文件之中。相关策略在这个源文件中主要体现为两个函数接口的定义：
@@ -129,7 +129,7 @@ void activeExpireCycle(int type);
 
 *Redis*有两种运行主动清理逻辑`activeExpireCycle`的方式：
 1. `ACTIVE_EXPIRE_CYCLE_FAST`，这种*快速*清理方式会运行不超过`EXPIRE_FAST_CYCLE_DURATION`毫秒对过期的*key*进行清理。*Redis*会在每次进入事件循环之前，调用这个类型类型的主动清理逻辑进行*快速*清理，同时保证在上一次*快速*清理之后`EXPIRE_FAST_CYCLE_DURATION`时间内，不会再次进行*快速*清理。
-2. `ACTIVE_EXPIRE_CYCLE_SLOW`，这种*慢速*清理方式时*Redis*中通用的普通清理模式，这种清理模式会在*Redis*的`databasesCron`中被调用，并且每次清理会占用一定百分比的`REDIS_HZ`时间，而这个百分比则是`ACTIVE_EXPIRE_CYCLE_SLOW_TIME_PERC`定义的。
+2. `ACTIVE_EXPIRE_CYCLE_SLOW`，这种*慢速*清理方式是*Redis*中通用的普通清理模式，这种清理模式会在*Redis*的`databasesCron`中被调用，并且每次清理会占用一定百分比的`REDIS_HZ`时间，而这个百分比则是`ACTIVE_EXPIRE_CYCLE_SLOW_TIME_PERC`定义的。
 
 `activeExpireCycle`这个函数的逻辑我们可以通过其代码片段进行了解：
 ```c
@@ -188,7 +188,7 @@ void activeExpireCycle(int type)
 
 这两个命令分别用于为*key*设定一个秒级的有效持续时间以及一个毫秒级的有效持续时间。
 2. 用于为*key*设定一个有效期截至的时间点：
-    
+   
     EXPIREAT key time
     PEXPIREAT key ms_time
 

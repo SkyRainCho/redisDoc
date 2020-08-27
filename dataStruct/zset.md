@@ -30,7 +30,7 @@ int zzlCompareElements(unsigned char *eptr, unsigned char *cstr, unsigned int cl
 unsigned int zzlLength(unsigned char *zl);
 ```
 
-上述者四个函数中：
+上述这四个函数中：
 
 1. `zzlLength`这个函数用于获取压缩链表中存储的*key-score*数据的个数。
 2. `zzlGetScore`，用于从给定的数据指针之中返回其所表示的分值*score*。
@@ -100,7 +100,7 @@ unsigned char *zzlDeleteRangeByRank(unsigned char *zl, unsigned int start, unsig
 unsigned long zsetLength(const robj *zobj);
 ```
 
-这个接口会更根据底层编码类型的不同，分别调用`zzlLength`或者直接访问`zskiplist.length`字段来获取有序集合对象的大小。
+这个接口会根据底层编码类型的不同，分别调用`zzlLength`或者直接访问`zskiplist.length`字段来获取有序集合对象的大小。
 
 接下来，我们来看一下*Redis*中有序集合的编码转换函数：
 
@@ -128,11 +128,11 @@ int zsetScore(robj *zobj, sds member, double *score);
 int zsetAdd(robj *zobj, double score, sds ele, int *flags, double *newscore);
 ```
 
-这个函数用于向有序集合之中插入一个新的元素，或者更新一个已有元素的分值。根绝参数`flags`传入的数值不同，这个函数会执行不同的策略：
+这个函数用于向有序集合之中插入一个新的元素，或者更新一个已有元素的分值。根据参数`flags`传入的数值不同，这个函数会执行不同的策略：
 
 1. `ZADD_INCR`，在当前元素分值的基础上加上给定的分值，用以更新元素分值；如果对应元素的*key*不存在，那么就假定其分值为0。
 2. `ZADD_NX`，拥有这个标记，那么只会在给定的*key*元素不存在的时候，才会执行操作。
-3. `ZADD_XX`，拥有这个标记，那么指挥在给定的*key*元素存在的时候，才会执行操作。
+3. `ZADD_XX`，拥有这个标记，那么只会在给定的*key*元素存在的时候，才会执行操作。
 
 同时，操作的结果标记也会通过`flags`这个参数返回，而能够返回的标记有：
 
@@ -157,7 +157,7 @@ int zsetDel(robj *zobj, sds ele);
 long zsetRank(robj *zobj, sds ele, int reverse);
 ```
 
-这个函数可以根据`reserve`参数的不同，返回一个从0开始的正向排序值，或者一个反向排序值。针对使用`OBJ_ENCODING_ZIPLIST`编码的有序集合，会遍历整个底层的压缩链表，通过`ziplistCompare`函数，来进行查找；对于使用`OBJ_ENCODING_SKIPLIST`的有序集合，则会先从`zset`中的哈希便利，查找对应的分值，在使用分值在跳跃表中通过`zslGetRank`来查找对应的顺序。
+这个函数可以根据`reserve`参数的不同，返回一个从0开始的正向排序值，或者一个反向排序值。针对使用`OBJ_ENCODING_ZIPLIST`编码的有序集合，会遍历整个底层的压缩链表，通过`ziplistCompare`函数，来进行查找；对于使用`OBJ_ENCODING_SKIPLIST`的有序集合，则会先从`zset`中的哈希表中，查找对应的分值，在使用分值在跳跃表中通过`zslGetRank`来查找对应的顺序。
 
 
 
@@ -230,7 +230,7 @@ void zremCommand(client *c);
 
     `ZREMRANGEBYLEX key min max`
 
-    执行这条命令的基数为，有序集合之中的所有的元素的分值必须一致，因为有序集合中，是优先按照分值排序，在分值相同的基础上，在按照元素的字典顺序进行排序的。因此，如果在一个分值不同的有序集合之中指向这个命令，将会导致错误产生。
+    执行这条命令的前提为，有序集合之中的所有的元素的分值必须一致，因为有序集合中，是优先按照分值排序，在分值相同的基础上，在按照元素的字典顺序进行排序的。因此，如果在一个分值不同的有序集合之中指向这个命令，将会导致错误产生。
 
 ```c
 void zremrangeGenericCommand(client *c, int rangetype);
@@ -308,7 +308,7 @@ void zrevrangeCommand(client *c);
 上述这两个命令都是用于从`key`所指定的有序集合返回落在`min`以及`max`区间内的成员元素，这两个命令都可以携带两个可选参数：
 
 1. `WITHSCORES`，如果命令的调用者给出了这个参数，那么成团的分值也会一并返回。
-2. `LIMIT`，这个可选参数主要数用来对返回结果的个数进行限制，其中`offset`用于表示结果的起始位置，而`count`则用来表示返回结果的个数。
+2. `LIMIT`，这个可选参数主要是用来对返回结果的个数进行限制，其中`offset`用于表示结果的起始位置，而`count`则用来表示返回结果的个数。
 
 ```c
 void genericZrangebyscoreCommand(client *c, int reverse);

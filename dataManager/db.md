@@ -146,7 +146,7 @@ robj *dbRandomKey(redisDb *db);
 int dbSyncDelete(redisDb *db, robj *key);
 int dbDelete(redisDb *db, robj *key);
 ```
-*Redis*定义了`dbSyncDelete`接口用于将一个*key*从键空间之中同步地删除并释放，显而易见*Redis*还定义了一个异步删除释放的接口`dbAsyncDelete`，这个接口被定义在*src/expire.c*之中，用于执行一种**惰性删除**的策略，对于这个策略的介绍会在后续的内容中进行讲解。是否执行**惰性删除**，*Redis*会根据`redisServer.lazyfree_lazy_server_del`这个开关进行控制。
+*Redis*定义了`dbSyncDelete`接口用于将一个*key*从键空间之中同步地删除并释放，显而易见*Redis*还定义了一个异步删除释放的接口`dbAsyncDelete`，这个接口被定义在*src/expire.c*之中，用于执行一种**惰性释放**的策略，对于这个策略的介绍会在后续的内容中进行讲解。是否执行**惰性释放**，*Redis*会根据`redisServer.lazyfree_lazy_server_del`这个开关进行控制。
 
 而`dbDelete`则是一个更高级的接口，它会根据服务器的开关，来决定使用`dbSyncDelete`还是`dbAsyncDelete`对*key*进行删除与释放。
 
@@ -154,7 +154,7 @@ int dbDelete(redisDb *db, robj *key);
 ```c
 long long emptyDb(int dbnum, int flags, void(callback)(void*));
 ```
-当`dbnum`为-1的话，则是清空所有数据库的键空间，否侧则清空指定数据库；而`flags`标记则会控制*Redis*是采取同步清空的逻辑，还是采取基于**惰性删除**策略的异步逻辑。
+当`dbnum`为-1的话，则是清空所有数据库的键空间，否则清空指定数据库；而`flags`标记则会控制*Redis*是采取同步清空的逻辑，还是采取基于**惰性释放**策略的异步逻辑。
 
 ## 键空间操作命令
 ### FLUSHDB与FLUSHALL命令
@@ -163,7 +163,7 @@ long long emptyDb(int dbnum, int flags, void(callback)(void*));
     FLUSHDB [ASYNC]
     FLUSHALL [ASYNC]
 
-**FLUSHDB**命令用于清空当前客户端选中的数据库键空间；**FLUSHALL**命令用于清空所有数据库的键空间。默认这两个命令在清空键空间时，都是采用同步的方式对键空间进行清空，这也就意味着如果键空间过于庞大的时候，同步清空会长期阻塞主线程，因此这对于较大的键空间，可以通过给定参数`ASYNC`来进行一种异步的**惰性删除**的策略，应用这种**惰性删除**策略，*Redis*会通过一个后台线程来实现对被删除键空间哈希表的释放。无论是否采用**惰性删除**，命令执行后，对于客户端来说，键空间都是处于一种被清空的状态。
+**FLUSHDB**命令用于清空当前客户端选中的数据库键空间；**FLUSHALL**命令用于清空所有数据库的键空间。默认这两个命令在清空键空间时，都是采用同步的方式对键空间进行清空，这也就意味着如果键空间过于庞大的时候，同步清空会长期阻塞主线程，因此这对于较大的键空间，可以通过给定参数`ASYNC`来进行一种异步的**惰性释放**的策略，应用这种**惰性释放**策略，*Redis*会通过一个后台线程来实现对被删除键空间哈希表的释放。无论是否采用**惰性释放**，命令执行后，对于客户端来说，键空间都是处于一种被清空的状态。
 ```c
 int getFlushCommandFlags(client *c, int *flags);
 void flushdbCommand(client *c);
@@ -176,7 +176,7 @@ void flushallCommand(client *c);
     DEL key [key ...]
     UNLINK key [key ...]
 
-上述的两个命令都可以接受多个*key*作为参数，并返回被删除*key*的个数。不过区别在于**DEL**命令使用的是同步的删除释放策略；而**UNLINK**命令则是与面携带`ASYNC`参数的**FLUSHDB**命令相似，采用异步的**惰性删除**策略，通过一个后台线程异步地对数据进行释放。
+上述的两个命令都可以接受多个*key*作为参数，并返回被删除*key*的个数。不过区别在于**DEL**命令使用的是同步的删除释放策略；而**UNLINK**命令则是与面携带`ASYNC`参数的**FLUSHDB**命令相似，采用异步的**惰性释放**策略，通过一个后台线程异步地对数据进行释放。
 ```c
 void delGenericCommand(client *c, int lazy);
 void delCommand(client *c);
