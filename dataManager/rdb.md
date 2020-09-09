@@ -11,12 +11,12 @@
 2. 被动方式，*Redis*检测一段时间内修改次数累积到一定的阈值时，会启动异步生成**RDB**文件的逻辑。
 
 对于**RDB**文件的自动备份，这里需要专门介绍一下，*Redis*会通过下面这个结构体来描述这个自动备份的阈值：
-    ```c
-    struct saveparam {
-        time_t seconds;
-        int changes;
-    };
-    ```
+```c
+struct saveparam {
+    time_t seconds;
+    int changes;
+};
+```
 这表示，如果*Redis*在`saveparam.seconds`秒数内累积了`saveparam.changes`次变化的化，便会启动备份。*Redis*可以保有多个这样的阈值，存储在服务器全局数据之中：
 ```c
 struct redisServer {
@@ -98,7 +98,7 @@ int rdbSaveLen(rio *rdb, uint64_t len);
 uint64_t rdbLoadLen(rio *rdb, int *isencoded);
 int rdbLoadLenByRef(rio *rdb, int *isencoded, uint64_t *lenptr);
 ```
-这三个函数则是用于实现长度信息的读写。
+这三个函数则是用于以压缩的方式实现长度数据的序列化与反序列化，也可以用于一个整数的序列化与反序列化。
 
 
 ## RDB对象数据的读写
@@ -125,21 +125,7 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val, long long expiretime);
 
 这也就意味着，*Redis*键空间之中的每一条数据都将以下面的几种存储格式之一序列化到文件之中：
 
-    ----------------------------------------------------------
-    |Expire Info|LRU/LFU Info|Object Type|Key Data|Value Data|
-    ----------------------------------------------------------
-
-    ----------------------------------------------
-    |LRU/LFU Info|Object Type|Key Data|Value Data|
-    ----------------------------------------------
-    
-    ---------------------------------------------
-    |Expire Info|Object Type|Key Data|Value Data|
-    ---------------------------------------------
-    
-    ---------------------------------
-    |Object Type|Key Data|Value Data|
-    ---------------------------------
+![对象RDB分布](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/%E5%AF%B9%E8%B1%A1RDB%E5%88%86%E5%B8%83.PNG)
 
 ## RDB辅助数据的读写
 此处说的辅助数据是指记录生成**RDB**数据时，系统的一些状态信息，*Redis*使用下面这个函数接口来向**RDB**数据之中写入辅助数据：
@@ -212,7 +198,7 @@ int rdbSaveRio(rio *rdb, int *error, int flags, rdbSaveInfo *rsi)
 ```
 由此我们可以看出，整个**RDB**文件中数据的分布格式，如下面的图片可视：
 
-![RDB文件数据格式]()
+![RDB文件数据格式](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/RDB%E6%96%87%E4%BB%B6%E6%95%B0%E6%8D%AE%E6%A0%BC%E5%BC%8F.PNG)
 
 而从**RDB**文件之中进行数据的反序列化逻辑色是通过`rdbLoadRio`这个函数实现的。这个加载**RDB**文件最为常用的场景，便是*Redis*在启动时，从磁盘**RDB**文件中将数据恢复到内存之中，这个逻辑被定义在*Redis*的`loadDataFromDisk`函数之中：
 ```c
