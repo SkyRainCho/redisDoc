@@ -32,6 +32,8 @@
 * [淘汰策略](dataManager/evict.md)
 * [RDB数据备份](dataManager/rdb.md)
 * [AOF数据备份](dataManager/aof.md)
+* [订阅与发布](dataManager/pubsub.md)
+* [MULTI/EXEC命令支持](dataManager/multi.md)
 
 ## 网络IO接口
 * [后台IO服务](dataManager/bio.md)
@@ -39,6 +41,7 @@
 * [套接字接口](network&IO/anet.md)
 * [事件驱动](network&IO/ae.md)
 * [同步IO](network&IO/syncio.md)
+* [阻塞操作](network&IO/blocked.md)
 
 ## Redis服务器组件
 * [Redis服务器](redis/server.md)
