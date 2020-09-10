@@ -33,6 +33,7 @@
 * [RDB数据备份](dataManager/rdb.md)
 * [AOF数据备份](dataManager/aof.md)
 * [订阅与发布](dataManager/pubsub.md)
+* [事件通知](dataManager/notify.md)
 * [MULTI/EXEC命令支持](dataManager/multi.md)
 
 ## 网络IO接口
