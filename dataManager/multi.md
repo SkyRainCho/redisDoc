@@ -1,4 +1,4 @@
-# Redis中AOF持久化策略
+# Redis中MULTI/EXEC命令的支持
 
 
 ***
