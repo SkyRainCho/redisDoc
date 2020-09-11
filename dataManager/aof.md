@@ -104,14 +104,196 @@ struct redisServer
     off_t aof_fsync_offset;
     time_t aof_last_fsync;
     time_t aof_flush_postponed_start;
+    int aof_last_write_status;
 }
 ```
 这些字段的含义为：
 1. `redisServer.aof_current_size`表示当前**AOF**文件的大小。
-1. `redisServer.aof_fsync_offset`表示当前已经被写入磁盘的**AOF**偏移。
+1. `redisServer.aof_fsync_offset`表示当前通过`write`系统调用写入文件的**AOF**偏移。
 1. `redisServer.aof_last_fsync`记录了上次**AOF**数据写入磁盘的时间戳。
+1. `redisServer.aof_flush_postponed_start`标记是否延时启动**AOF**写入，如果当前有正在后台运行的线程执行**AOF**磁盘写入，那么这个标记将会被设置，通过`wirte`系统调用写入**AOF**的操作将会被推迟。
+1. `redisServer.aof_last_write_status`记录了上次调用`write`系统调用的结果，可以为`C_OK`或者`C_ERR`，如果内核的文件缓冲区已满，那么`write`有可能失败。
 
-## 重写**AOF**文件
+*Redis*将内存中`redisServer.aof_buf`缓存写入**AOF**文件是通过`flushAppendOnlyFile`这个函数来实现的。这个函数有若干个被调用的场合：
+- 在*Redis*主线程每次进去事件循环等待之前，该函数会被调用：
+```c
+int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
+    ...
+    if (server.aof_flush_postponed_start)
+        flushAppendOnlyFile(0);
+
+    run_with_period(1000) {
+        if (server.aof_last_write_status == C_ERR)
+            flushAppendOnlyFile(0);
+    }
+    ...
+}
+```
+- 在*Redis*服务器的心跳函数中，该函数会被调用：
+```c
+void beforeSleep(struct aeEventLoop *eventLoop)
+{
+    ...
+    flushAppendOnlyFile(0);
+    ...
+}
+```
+- 在*Redis*服务器准备关闭之前，这个函数会被调用：
+```c
+int prepareForShutDown(int flags) {
+    ...
+    if (server.aof_state != AOF_OFF)
+    {
+        ...
+        flushAppendOnlyFile(1);
+        redis_fsync(server.aof_fd);
+    }
+    ...
+}
+```
+
+根据*Redis*设置的**AOF**文件写入磁盘的策略不同，*Redis*会执行如下不同的逻辑：
+1. `AOF_FSYNC_ALWAYS`，会调用`write`系统调用将`redisServer.aof_buf`写入文件，然后立刻调用`fsync`将文件写入磁盘。
+1. `AOF_FSYNC_EVERYSEC`，会调用`write`系统调用将`redisServer.aof_buf`写入文件，每隔1秒钟，启动一个后台任务，用于异步地将文件通过`fsync`写入磁盘。
+1. `AOF_FSYNC_NO`，只通过调用`write`将`redisServer.aof_buf`写入文件，至于文件何时被写入磁盘，则由操作系统自行决定。
+
+现在我们可以看一下`flushAppendOnlyFile`的实现细节，从中我们可以了解到命令记录是如何被追加到**AOF**文件之中：
+```c
+void flushAppendOnlyFile(int force) {
+    ...
+    if (sdslen(server.aof_buf) == 0)
+    {
+        //对于使用AOF_FSYNC_EVERYSEC策略的AOF持久化。
+        //如果内存缓存已经全部通过write写入文件内核缓冲区，
+        //但是内核缓冲区没有被fsync全部写入磁盘，同时没有在后台运行的fsync线程，
+        //那么尝试将缓冲区的内容调用fsync写入磁盘
+    }
+
+    if (server.aof_fsync == AOF_FSYNC_EVERYSEC)
+        sync_in_progress = aofFsyncInProgress();
+
+    if (server.aof_fsync == AOF_FSYNC_EVERYSEC && !force)
+    {
+        if (sync_in_progress)
+        {
+            //对于使用AOF_FSYNC_EVERYSEC策略的AOF持久化，
+            //如果有在后台运行的异步fsync操作，那么设置aof_flush_postponed_start，
+            //同时推迟这次的flushAppendOnlyFile操作
+        }
+    }
+
+    //通过write系统调用将aof_buf写入文件
+    nwritten = aofWrite(server.aof_fd, server.aof_buf, sdslen(server.aof_buf));
+    ...
+    server.aof_flush_postponed_start = 0;
+
+    if (nwritten != sdslen(server.aof_buf))
+    {
+        //如果write写入的数据长度不等于aof_buf的长度，那么说明此时内核缓冲区不足
+        server.aof_last_write_status = C_ERR;
+    }
+    ...
+try_fsync:
+    ...
+    if (server.aof_fsync == AOF_FSYNC_ALWAYS)
+    {
+        redis_fsync(server.aof_fd);    
+    }
+    else if (server.aof_fsync == AOF_FSYNC_EVERYSEC)
+    {
+        if (!sync_in_progress)
+        {
+            aof_backgroud_fsync(server.aof_fd);
+        }
+    }
+}
+```
+
+*Redis*在默认情况，会关闭**AOF**持久化策略，我们可以通过修改配置文件来开启**AOF**持久化策略，另外我们可以在*Redis*运行中通过命令来开启**AOF**持久化：
+
+    CONFIG SET appendonly on
+
+那么在运行时开启**AOF**策略的处理逻辑是由`startAppendOnly`函数来实现的：
+```c
+int startAppendOnly(void);
+```
+这个函数的逻辑为：
+1. 服务器必须处于**AOF**关闭的状态，`server.aof_state == AOF_OFF`。
+1. 如果有一个子进程在重写**AOF**文件，那么先杀掉这个子进程。
+1. 通过`rewriteAppendOnlyFileBackground()`函数来执行一次重写**AOF**文件，由于**AOF**本质是增量备份，因此这一步相当于先对整个数据库键空间进行一次全量备份。
+1. 将`server.aof_state`设置为`AOF_WAIT_REWRITE`，在重写**AOF**结束之后，这个标记会被修改为`AOF_ON`。
+
+
+## 重写AOF文件
+*Redis*对于重写**AOF**文件都是启动一个子进程以异步的方式进行的，启动重写**AOF**文件有两种方式，一种是客户端执行**BGREWRITEAOF**命令；另外一种是在服务器心跳中，检查文件大小，当**AOF**文件大小超过一定阈值时，启动重写机制。
+
+在了解重写**AOF**之前，我们先看一下*Redis*服务器全局变量中相关的一些内容：
+```c
+struct redisServer {
+    int aof_rewrite_min_size;
+    int aof_rewrite_base_size;
+    int aof_rewrite_perc;
+    int aof_rewrite_scheduled;
+    ...
+};
+```
+这里：
+1. `redisServer.aof_rewrite_min_size`用于开启重写机制的**AOF**文件大小的阈值。
+1. `redisServer.aof_rewrite_base_size`与`redisServer.aof_rewrite_perc`，这两个字段用于处理当**AOF**文件大小超过`aof_rewrite_base_size`的百分比，如果超过阈值，那么将开启重写机制。
+1. `redisServer.aof_rewrite_scheduled`是一个调度标记，**BGREWRITEAOF**命令并不会立即启动重写机制，而是设置好`aof_rewrite_scheduled`，在下一次心跳中去启动该机制。
+
+这里我们可以看一下*Redis*服务器心跳之中的相关代码：
+```c
+int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData)
+{
+    ...
+    if (server.rdb_child_pid == -1 && server.aof_child_pid == -1 &&
+        server.aof_rewrite_scheduled)
+    {
+        rewriteAppendOnlyFileBackground();
+    }
+
+    ...
+    if (server.aof_state == AOF_ON &&
+        server.rdb_child_pid == -1 &&
+        server.aof_child_pid == -1 &&
+        server.aof_rewrite_perc &&
+        server.aof_current_size > server.aof_rewrite_min_size)
+    {
+        long long base = server.aof_rewrite_base_size ? server.aof_rewrite_base_size : 1;
+        long long growth = (server.aof_current_size * 100/base) - 100;
+        if (growth >= server.aof_rewrite_perc)
+        {
+            rewriteAppendOnlyFileBackground();
+        }
+    }
+
+    ...
+}
+```
+
+在了解`rewriteAppendOnlyFileBackground`这个函数之前，我们先看一些底层的辅助函数，首先我们来看一下*Redis*用于重写对象数据的函数：
+```c
+int rewriteListObject(rio *r, robj *key, robj *o);
+int rewriteSetObject(rio *r, robj *key, robj *o);
+int rewriteSoredSetObject(rio *r, robj *key, robj *o);
+int rewriteHashObject(rio *r, robj *key, robj *o);
+int rewriteStreamObject(rio *r, robj *key, robj *o);
+int rewriteModuleObject(rio *r, robj *key, robj *o);
+```
+应用上面这几个函数，*Redis*可以将键空间之中的对象数据转化为命令的形式被记录在**AOF**文件之中。某些对象数据之中可能具有多个子元素，因此*Redis*定义了一个限制`AOF_REWRITE_ITEMS_PER_CMD`，即每条命令最多可以添加的元素个数，如果键空间中的有一个数据对象的子元素超过了这个限制，那么*Redis*将会将一条过长的命令记录拆解成多条命令记录在**AOF**文件之中。
+
+
+
+
+
+
+
+
+
+
+
+## 加载AOF文件
 
 
 ***
