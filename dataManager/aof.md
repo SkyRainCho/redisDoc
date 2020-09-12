@@ -383,14 +383,37 @@ struct redisServer {
 3. 父进程在事件循环之中检测到`redisServer.aof_pipe_write_data_to_child`可写时，会调用注册的事件处理函数`aofChildWriteDiffData`，这个函数会将`redisServer.aof_write_buf_blocks`中的命令记录通过`redisServer.aof_pipe_write_data_to_child`写入管道，等待子进程读取。
 4. 子进程在`rewriteAppendOnlyFile`函数完成文件写入后，会循环数次尝试从`redisServer.aof_pipe_read_data_from_parent`对应的管道中调用`aofReadDiffFromParent`函数读取父进程发送来的命令记录，并将这些数据存储在子进程`redisServer.aof_child_diff`缓存之中。
 5. 子进程在`rewriteAppendOnlyFile`函数完成`aofReadDiffFromParent`数据读取时，向`redisServer.aof_pipe_write_ack_to_parent`这个管道的写入端写入一个`!`通知父进程。
-6. 父进程从`redisServer.aof_pipe_read_ack_from_child`这个管道的读取端上监听的可读事件返回，调用对应的事件处理函数`aofChildPipeReadable`，这个函数会停止向`redisServer.aof_pipe_write_data_to_child`对应的管道之中写入数据，同时向`redisServer.aof_pipe_write_ack_to_child`对应的管道之中写入一个确认数据`!`。
+6. 父进程从`redisServer.aof_pipe_read_ack_from_child`这个管道的读取端上监听的可读事件返回，调用对应的事件处理函数`aofChildPipeReadable`，这个函数会停止向`redisServer.aof_pipe_write_data_to_child`对应的管道之中写入数据，同时向`redisServer.aof_pipe_write_ack_to_child`对应的管道之中写入一个确认数据`!`。此时停止了将重写缓存写入管道的过程，但是由于子进程没有退出，如果在这一步之后执行的命令，依然会被记录到父进程的重写缓存之中，但不会发送给子进程。
 7. 子进程在函数`rewriteAppendOnlyFile`中，在第5步向`redisServer.aof_pipe_write_ack_to_parent`写入一个确认数据之后，便调用`syncRead`接口同步等待读取父进程在第6步中发送来的确认数据。
 8. 子进程在`rewriteAppendOnlyFile`收到父进程的确认信息之后，最后在调用一次`aofReadDiffFromParent`完成数据的读取，然后将记录在`redisServer.aof_child_diff`缓存中的数据追加到重写后的**AOF**文件之中。子进程在完成数据写入之后，成功结束。
-9. 父进程在检测到子进程退出后，会调用`backgroundRewriteDoneHandler`这个函数接口，完成后续的处理步骤
-
-
+9. 父进程在检测到子进程退出后，会调用`backgroundRewriteDoneHandler`这个函数接口，完成后续的处理步骤，在第6步中我们知道依然有一些在重新**AOF**文件过程中被执行的命令存储在父进程的重写缓存之中，那么在子进程成功退出之后，父进程会调用`aofRewriteBufferWrite`这个接口，将重写缓存之中的命令记录追加到新的**AOF**文件之中，最终完成整个重写**AOF**文件的过程。
 
 ## 加载AOF文件
+
+*Redis*通过下面这个函数来完成**AOF**文件的加载：
+
+```c
+int loadAppendOnlyFile(char *filename);
+```
+
+如果同时开启了**AOF**以及**RDB**两种策略的话，在启动时要如何选择呢？我们知道**AOF**策略虽然最终生成的文件大小要大于**RDB**策略生成的文件，但是**AOF**策略可能造成的数据丢失是最少的，因此如果同时开启两种持久化策略，那么在加载时*Redis*会优先使用**AOF**文件进行数据的恢复，这一点也可以在*Redis*的代码之中有所体现：
+
+```c
+void loadDataFromDisk(void) {
+	if (server.aof_state == AOF_ON) {
+        loadAppendOnlyFile(server.aof_filename);
+        ...
+	else
+    {
+        rdbLoad(server.rdb_filename,&rsi);
+        ...
+    }
+}
+```
+
+启动加载**AOF**文件本质上就是重新执行**AOF**文件之中命令记录的过程，而*Redis*执行命令都是通过`client`来发起的，因此在启动加载**AOF**文件时，*Redis*会通过`createFakeClient`函数分配一个假的客户端，用以执行**AOF**之中的命令记录。另外通过前面的介绍，*Redis*可能会采用`aof_use_rdb_preamble`策略来重写**AOF**文件，那么`loadAppendOnlyFile`的一项工作便是检测加载的**AOF**文件是否包含一个**RDB**文件。通过前面的讲解，我们知道**RDB**文件是以`REDIS`加上**RDB**版本号开头的；而正常的**AOF**文件没有一个专门的文件开始的标记字符串，但是每一条命令记录都是以`*`这个字符作为起始的。因此我们只需要检测当前文件的前五个字符，如果是`REDIS`就说明这个**AOF**文件之中包含了一个完整的**RDB**文件，那么就需要调用`rdbLoadRio`函数，先从**RDB**文件之中读取并恢复数据。同时由于**RDB**文件在数据序列化的过程中包含了类型以及长度信息，并且在文件的结尾还包含了一个特殊的结束标记，因此不用担心`rbdLoadRio`调用会读取到**RDB**文件后面的**AOF**命令记录部分。
+
+最后`loadAppendOnlyFile`函数会从**AOF**文件之中解析读取每一条命令，并通过创建的假客户端对象执行该命令，以完成数据的加载恢复。
 
 
 ***
