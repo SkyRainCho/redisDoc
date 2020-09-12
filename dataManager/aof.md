@@ -283,13 +283,110 @@ int rewriteModuleObject(rio *r, robj *key, robj *o);
 ```
 应用上面这几个函数，*Redis*可以将键空间之中的对象数据转化为命令的形式被记录在**AOF**文件之中。某些对象数据之中可能具有多个子元素，因此*Redis*定义了一个限制`AOF_REWRITE_ITEMS_PER_CMD`，即每条命令最多可以添加的元素个数，如果键空间中的有一个数据对象的子元素超过了这个限制，那么*Redis*将会将一条过长的命令记录拆解成多条命令记录在**AOF**文件之中。
 
+而下面这个函数则是*Redis*用于将这个数据库键空间转化为命令记录写入**AOF**文件的接口：
 
+```c
+int rewriteAppendOnlyFileRio(rio *aof);
+```
 
+*Redis*通过这个函数依次遍历每个数据库的键空间中的每一个数据，对于每一个新被遍历的数据，会追加一条**SELECT**命令的记录；而对于键空间之中携带过期时间的数据，则会为其追加一条**nPEXPIREAT**命令的记录。最终所有这些命令会被写入封装了**AOF**文件的`rio`对象之中。
 
+如果阅读*src/aof.c*源码，我们发现`rewriteAppendOnlyFileRio`并不是重写**AOF**文件的顶层接口，这个真正的接口是下面这个函数：
 
+```c
+int rewriteAppendOnlyFile(char *filename);
+```
 
+那么为什么要在`rewriteAppendOnlyFileRio`函数的基础上在实现一个`rewriteAppendOnlyFile`函数呢？这里就要涉及到*Redis*在重写**AOF**文件时的一个可选策略了，通过上面对于`rewriteAppendOnlyFileRio`这个函数的讲解我们可以了解到，所谓重写**AOF**文件，实际上时执行一次对于数据库键空间的全量的备份，而后续被执行的命令则会被追加到这个新的全量备份之后。然而对于基于命令记录的**AOF**文件，即使是重写时清理的冗余的以及无效的数据，其文件的大小依然要大于使用**RDB**策略生产的全量备份文件。因此*Redis*在重写**AOF**文件时，可以选择一种`aof_use_rdb_preamble`策略，应用这种策略，在对数据库键空间进行全量备份的时候，会使用**RDB**策略生成文件，而后续被执行的命令以**AOF**的格式被追加到这个**RDB**文件之后。这一点可以通过`rewriteAppendOnlyFile`代码片段了解到。
 
+```c
+int rewriteAppendOnlyFile(char *filename) {
+    rio aof;
+    FILE *fp;
+    char tmpfile[256];
+    char byte;
+    
+    snprintf(tmpfile,256,"temp-rewriteaof-%d.aof", (int) getpid());
+    fp = fopen(tmpfile,"w");
+    rioInitWithFile(&aof,fp);
+    if (server.aof_rewrite_incremental_fsync)
+        rioSetAutoSync(&aof,REDIS_AUTOSYNC_BYTES);
+    
+    if (server.aof_use_rdb_preamble) {
+        rdbSaveRio(&aof,&error,RDB_SAVE_AOF_PREAMBLE,NULL);
+    }
+    else
+    {
+        rewriteAppendOnlyFileRio(&aof);
+    }
+    
+    fflush(fp);
+    fsync(fileno(fp));
+    ...
+}
+```
 
+而`rewriteAppendOnlyFileBackground`与后台异步生成**RDB**文件的处理方式类似，通过`fork`系统调用创建一个子进程，子进程调用`rewriteAppendOnlyFileBackground`重写**AOF**文件。然而这样会产生另外一个问题，便是在子进程重写**AOF**文件时，如果父进程因为新的命令而引入新的变化时，要如何将这些变化进行持久化。也许有人会问，异步生成**RDB**文件时，也会出现产生新变化的可能，为什么**RDB**策略不需要关注这个问题？这主要是因为，每次生成**RDB**文件时，都是从键空间之中生成全量的备份，而在异步生成**RDB**文件出现的新变化也是存储在数据库的键空间之中。那么在下一次生成**RDB**文件时，这些新的变化会被持续化到新的**RDB**文件之中，而不会造成数据丢失。但是**AOF**策略是基于命令记录的持久化，内存中数据库键空间中只会存储数据而不会存储命令记录，因此如果不进行特殊处理，那么在异步重写**AOF**文件时引入的新变化将会丢失。
+
+对于上面这种情况，*Redis*会在父进程中将异步生成**AOF**文件时，将这个时间段的客户端命令存储在一个重写缓存之中，等待重写完成后在对这些缓存的命令进程处理，首先我们看一下，*Redis*对于重写缓存的数据结构与数据字段：
+
+```c
+#define AOF_RW_BUF_BLOCK_SIZE (1024*1024*10)
+typedef struct aofrwblock {
+    unsigned long used, free;
+    char buf[AOF_RW_BUF_BLOCK_SIZE];
+} aofrwblock;
+
+struct redisServer {
+    ...
+    list *aof_rewrite_buf_blocks;
+    ...
+};
+```
+
+*Redis*提供了一个接口用于将格式化的命令记录写入到`redisServer.aof_rewrite_buf_blocks`之中：
+
+```c
+void aofRewriteBufferAppend(unsigned char *s, unsigned long len);
+```
+
+*Redis*在执行命令时调用`feedAppendOnlyFile`时，如果检测到现在有后台执行**AOF**的子进程时，那么会执行`aofRewriteBufferAppend`，将命令追加到重写缓存中：
+
+```c
+void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc) {
+	...
+    if (server.aof_child_pid != -1)
+        aofRewriteBufferAppend((unsigned char*)buf,sdslen(buf));
+    ...
+}
+```
+
+同时在*Redis*服务器的全局变量之中，还定义了若干个管道文件描述符，用于在重写**AOF**文件时，处理父进程与子进程之间的通信：
+
+```c
+struct redisServer {
+    ...
+    int aof_pipe_write_data_to_child;
+    int aof_pipe_read_data_from_parent;
+    int aof_pipe_write_ack_to_parent;
+    int aof_pipe_read_ack_from_child;
+    int aof_pipe_write_ack_to_child;
+    int aof_pipe_read_ack_from_parent;
+    ...
+}
+```
+
+*Redis*在启动重写**AOF**文件时，在`fork`创建子进程之前，会调用`aofCreatePipes`函数初始化上述的三对管道，同时将`redisServer.aof_pipe_read_ack_from_child`的可读事件注册到服务器的事件循环之中，也就是主进程会在后续等待`redisServer.aof_pipe_read_ack_from_child`上的可读事件。现在我们可以看一下*Redis*在处理重写缓存时的逻辑：
+
+1. 主进程在调用`rewriteAppendOnlyFileBackground`时，调用`aofCreatePipes`初始化管道，并监听`redisServer.aof_pipe_read_ack_from_child`上的可读事件，同时记录`redisServer.aof_child_pid`这个子进程ID。
+2. 主进程在后续执行客户端命令时 ，将命令记录调用`aofRewriteBufferAppend`写入重写缓存`redisServer.aof_rewrite_buf_blocks`，并向父进程的事件循环之中注册监听`redisServer.aof_pipe_write_data_to_child`的可写事件。
+3. 父进程在事件循环之中检测到`redisServer.aof_pipe_write_data_to_child`可写时，会调用注册的事件处理函数`aofChildWriteDiffData`，这个函数会将`redisServer.aof_write_buf_blocks`中的命令记录通过`redisServer.aof_pipe_write_data_to_child`写入管道，等待子进程读取。
+4. 子进程在`rewriteAppendOnlyFile`函数完成文件写入后，会循环数次尝试从`redisServer.aof_pipe_read_data_from_parent`对应的管道中调用`aofReadDiffFromParent`函数读取父进程发送来的命令记录，并将这些数据存储在子进程`redisServer.aof_child_diff`缓存之中。
+5. 子进程在`rewriteAppendOnlyFile`函数完成`aofReadDiffFromParent`数据读取时，向`redisServer.aof_pipe_write_ack_to_parent`这个管道的写入端写入一个`!`通知父进程。
+6. 父进程从`redisServer.aof_pipe_read_ack_from_child`这个管道的读取端上监听的可读事件返回，调用对应的事件处理函数`aofChildPipeReadable`，这个函数会停止向`redisServer.aof_pipe_write_data_to_child`对应的管道之中写入数据，同时向`redisServer.aof_pipe_write_ack_to_child`对应的管道之中写入一个确认数据`!`。
+7. 子进程在函数`rewriteAppendOnlyFile`中，在第5步向`redisServer.aof_pipe_write_ack_to_parent`写入一个确认数据之后，便调用`syncRead`接口同步等待读取父进程在第6步中发送来的确认数据。
+8. 子进程在`rewriteAppendOnlyFile`收到父进程的确认信息之后，最后在调用一次`aofReadDiffFromParent`完成数据的读取，然后将记录在`redisServer.aof_child_diff`缓存中的数据追加到重写后的**AOF**文件之中。子进程在完成数据写入之后，成功结束。
+9. 父进程在检测到子进程退出后，会调用`backgroundRewriteDoneHandler`这个函数接口，完成后续的处理步骤
 
 
 
