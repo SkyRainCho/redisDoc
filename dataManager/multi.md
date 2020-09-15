@@ -1,4 +1,4 @@
-# Redis中MULTI/EXEC命令的支持
+# Redis事务支持
 
 
 ***
