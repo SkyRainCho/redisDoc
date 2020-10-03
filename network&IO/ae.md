@@ -7,9 +7,9 @@
 |`#define AE_NONE 0`|没有事件被注册|
 |`#define AE_READABLE 1`|当描述符可读时触发|
 |`#define AE_WRITABLE 2`|当描述符可写时触发|
-|`#define AE_BARRIER 4`|如果在同一个事件循环迭代中，如果有读事件触发，那么即使可写也不触发该时间|
+|`#define AE_BARRIER 4`|如果在同一个事件循环迭代中，如果有读事件触发，那么即使可写也不触发该事件|
 
-在*Redis*中，定了两种事件类型，分别是文件事件与时间事件：
+在*Redis*中，定了两种事件类型，分别是文件事件与时间事件，所谓文件事件类型是指服务器接收客户端的连接，或者是在于客户端建立的连接上的读写操作；而时间事件类型，在当前的*Redis*之中，唯一的时间事件是服务器的心跳逻辑，用于处理服务器的定期操作：
 ```c
 /*文件事件结构体*/
 typedef struct aeFileEvent {
@@ -48,8 +48,8 @@ typedef struct aeEventLoop {
     aeTimeEvent *timeEventHead;
     int stop;                    /*事件停止标志符*/
     void *apidata;               /*用于Poll的API调用的数据*/
-    aeBeforeSleepProc *beforesleep;    /*每次事件循环中都开始执行的函数*/
-    aeBeforeSleepProc *aftersleep;     /**/
+    aeBeforeSleepProc *beforesleep;    /*每次进入事件循环前执行的函数*/
+    aeBeforeSleepProc *aftersleep;     /*每次事件循环结束后执行的函数*/
 } aeEventLoop;
 ```
 
@@ -158,9 +158,7 @@ typedef struct aeApiState {
         aeProcessEvents(eventLoop, AE_ALL_EVENTS|AE_CALL_AFTER_SLEEP);
     }
 ```
-而`aeProcessEvents`函数是处理一次事件循环的主体，
-处理每个待处理的时间事件，然后处理每个待处理的文件事件（可以通过刚刚处理的时间事件回调来注册）。 
-没有特殊标志的情况下，该函数将一直休眠，直到引发某些文件事件或下次发生事件（如果有）时为止。
+而`aeProcessEvents`函数是处理一次事件循环的主体，处理每个待处理的时间事件，然后处理每个待处理的文件事件（可以通过刚刚处理的时间事件回调来注册）。 没有特殊标志的情况下，该函数将一直休眠，直到引发某些文件事件或下次发生事件（如果有）时为止。
 * 如果`flags`为0，则该函数不执行任何操作并返回。
 * 如果`flags`设置了`AE_ALL_EVENTS`，则处理所有类型的事件。
 * 如果`flags`设置了`AE_FILE_EVENTS`，则处理文件事件。
@@ -171,9 +169,7 @@ typedef struct aeApiState {
 该函数返回已处理事件的数量。
 
 其基本流程为：
-1. 确定`aeApiPoll`等待的`timeval`，而这段逻辑可以保证，在即使没有文件事件触发的情况下，
-`aeApiPoll`仍然可以在最近的一次计时器时间事件到来之前返回，
-而不会错过对后续时间事件的处理。其具体逻辑为：
+1. 确定`aeApiPoll`等待的`timeval`，而这段逻辑可以保证，在即使没有文件事件触发的情况下，`aeApiPoll`仍然可以在最近的一次计时器时间事件到来之前返回，而不会错过对后续时间事件的处理。其具体逻辑为：
 ```c
     //如果设置了AE_TIME_EVENTS标记，同时没有设置AE_DONT_WAIT，搜索最近的时间事件
     if (flags & AE_TIME_EVENTS && !(flags & AE_DONT_WAIT))
@@ -199,17 +195,12 @@ typedef struct aeApiState {
 ```c
     numevents = aeApiPoll(eventLoop, tvp);
 ```
-3. 如果设置了`AE_CALL_AFTER_SLEEP`标记，同时通过调用`aeSetAfterSleepProc`设置了`aftersleep`，
-那么会在`aeApiPoll`唤醒返回后，执行`aftersleep`逻辑：
+3. 如果设置了`AE_CALL_AFTER_SLEEP`标记，同时通过调用`aeSetAfterSleepProc`设置了`aftersleep`，那么会在`aeApiPoll`唤醒返回后，执行`aftersleep`逻辑：
 ```c
     if (eventLoop->aftersleep != NULL && flags & AE_CALL_AFTER_SLEEP)
         eventLoop->aftersleep(eventLoop);
 ```
-4. 由于在aeApiPoll接口中已经将从内核返回的就绪事件拷贝到了事件循环中的fired就绪事件列表中了，
-后续会循环处理所有的就绪事件，通常情况下，我们会先处理可读事件，然后执行可写事件的处理逻辑，
-这在类似于执行查询操作后立即反馈查询结果这样的场景中
-很有用。但是如果在`flags`掩码中设置了`AE_BARRIER`标记，那么*Redis*会要求我们将执行顺序翻转过来，也就是在可读事件之后，
-绝不触发可写事件的处理。例如当我们需要在响应客户端请求之前，通过调用`beforeSleep`执行类似同步文件到磁盘的操作时，会很用：
+4. 由于在aeApiPoll接口中已经将从内核返回的就绪事件拷贝到了事件循环中的fired就绪事件列表中了，后续会循环处理所有的就绪事件，通常情况下，我们会先处理可读事件，然后执行可写事件的处理逻辑，这在类似于执行查询操作后立即反馈查询结果这样的场景中很有用。但是如果在`flags`掩码中设置了`AE_BARRIER`标记，那么*Redis*会要求我们将执行顺序翻转过来，也就是在可读事件之后，绝不触发可写事件的处理。例如当我们需要在响应客户端请求之前，通过调用`beforeSleep`执行类似同步文件到磁盘的操作时，会很用：
 ```c
     for (j = 0; j < numevents; j++) {
         aeFileEvent *fe = &eventLoop->events[eventLoop->fired[j].fd];
@@ -276,10 +267,7 @@ typedef struct aeApiState {
     }
 ```
 
-3. 处理已经到期的时间事件，会调用时间事件`timeProc`的处理函数，来处理到期触发的计时器时间事件，
-如果这个时间事件是一个一次性触发的时间事件，那么会返回`AE_NOMORE`标记，这时将该事件设置为`AE_DELETED_EVENT_ID`，
-在下次事件循环中删除这个事件；如果这个时间事件是一个周期触发的时间事件，那么`timeProc`会返回下次触发的毫秒数，
-通过`aeAddMillisecondsToNow`，将新的时间更新到这个时间事件上：
+3. 处理已经到期的时间事件，会调用时间事件`timeProc`的处理函数，来处理到期触发的计时器时间事件，如果这个时间事件是一个一次性触发的时间事件，那么会返回`AE_NOMORE`标记，这时将该事件设置为`AE_DELETED_EVENT_ID`，在下次事件循环中删除这个事件；如果这个时间事件是一个周期触发的时间事件，那么`timeProc`会返回下次触发的毫秒数，通过`aeAddMillisecondsToNow`，将新的时间更新到这个时间事件上：
 ```c
     while(te) {
         ...
