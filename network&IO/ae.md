@@ -158,29 +158,29 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
 1. 通过`epoll_wait`这个系统调会以阻塞的方式等待前面注册的文件描述符上的事件，当有事件就绪，该函数会返回就绪事件的个数。
 1. 通过循环遍历，将内核中返回的就绪事件提取出来，将其复制到*Redis*事件循环的已触发事件队列`aeEventLoop.fired`上面。
 
+这样，通过上述的步骤，*Redis*的事件循环便可以通过`epoll_wait`接口，从内核中取出一系列的就绪事件，然后对所有的就绪事件进行处理。
+
 ## 事件循环接口函数定义
+前面我们在系统调用层面介绍了事件驱动的实现细节，下面我们来看一下*Redis*如何应用系统调用来实现事件驱动的事件循环的，首先我们先来看一下相关的函数接口：
+1. `aeEventLoop *aeCreateEventLoop(int setsize)`，这个函数用于创建并初始化一个事件循环`aeEventLoop`的结构体，初始可以监听的文件描述符列表`aeEventLoop.events`的长度会被设置为`setsize`。
+1. `void aeDeleteEventLoop(aeEventLoop *eventLoop)`，在程序结束时释放整个事件循环结构体。
+1. `void aeStop(aeEventLoop *eventLoop)`，用于设置`aeEventLoop.stop`停止标记。
+1. `int aeGetSetSize(aeEventLoop *eventLoop)`，获取事件循环中监听队列大小。
+1. `int aeResizeSetSize(aeEventLoop *eventLoop, int setsize)`，调整事件循环的监听队列大小。
+1. `void aeSetBeforeSleepProc(aeEventLoop *eventLoop, aeBeforeSleepProc *beforesleep)`，设置事件驱动进入事件循环前需要执行函数接口。
+1. `void aeSetAfterSleepProc(aeEventLoop *eventLoop, aeBeforeSleepProc *aftersleep)`，设置事件驱动结束一次事件循环时需要执行的函数接口。
+1. `int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask, aeFileProc *proc, void *clientData)`，向事件循环之中创建一个文件事件，设置其监听的事件掩码`mask`以及事件处理函数`proc`；同时会设置客户端数据`clientData`，这个数据将会被赋值给文件事件结构体`aeFileEvent.clientData`字段中。
+1. `void aeDeleteFileEvent(aeEventLoop *eventLoop, int fd, int mask)`，从事件循环中删除指定文件描述符`fd`的文件事件上监听的`mask`事件。
+1. `int aeGetFileEvents(aeEventLoop *eventLoop, int fd)`，根据文件描述符找出对应的文件事件在事件循环之中监听的事件掩码。
+1. `long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds, aeTimeProc *proc, void *clientData, aeEventFinalizerProc *finalizerProc)`，向事件循环中添加一个`milliseconds`毫秒后被触发的时间事件，设定其处函数`proc`以及客户端数据`clientData`，并且可以选择性设定结束处理函数`finalizerProc`，*Redis*会根据`aeEventLoop.timeEventNextId`为新的事件事件分配一个序号，记录在`aeTimeEvent.id`字段上。
+1. `int aeDeleteTimeEvent(aeEventLoop *eventLoop, long long id)`，给定一个时间事件序号，将其从事件循环之中删除。
+1. `void aeMain(aeEventLoop *eventLoop)`，事件驱动执行主程序。
+1. `int aeProcessEvents(aeEventLoop *eventLoop, int flags)`，事件循环处理函数。
+1. `int aeWait(int fd, int mask, long long milliseconds)`，在某个文件描述符`fd`上阻塞等待，直到事件`mask`被触发，或者阻塞时间超过`milliseconds`。
 
-基础操作接口
-|函数定义|函数含义|
-|-------|------|
-|`aeEventLoop *aeCreateEventLoop(int setsize)`|创建一个事件循环`aeEventLoop`|
-|`void aeDeleteEventLoop(aeEventLoop *eventLoop)`|删除事件循环，释放对应时间所占的空间|
-|`void aeStop(aeEventLoop *eventLoop)`|设置`aeEventLoop.stop`的停止标记为1|
-|`int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,...)`|在给定的`aeEventLoop`找那个创建对应的文件事件|
-|`void aeDeleteFileEvent(aeEventLoop *eventLoop, int fd, int mask)`|从给定的事件循环中删除指定文件描述符的文件事件|
-|`int aeGetFileEvents(aeEventLoop *eventLoop, int fd)`|根据文件描述符，找出对应的文件的事件|
-|`long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,...)`|在事件循环中添加一个多少毫秒后被触发的时间事件|
-|`int aeDeleteTimeEvent(aeEventLoop *eventLoop, long long id)`|从事件循环中删除对应时间事件|
-|`int aeProcessEvents(aeEventLoop *eventLoop, int flags)`|处理事件循环中的事件|
-|`int aeWait(int fd, int mask, long long milliseconds)`|让某个事件等待|
-|`void aeMain(aeEventLoop *eventLoop)`|事件循环执行主程序|
-|`char *aeGetApiName(void)`||
-|`void aeSetBeforeSleepProc(aeEventLoop *eventLoop, aeBeforeSleepProc *beforesleep)`||
-|`void aeSetAfterSleepProc(aeEventLoop *eventLoop, aeBeforeSleepProc *aftersleep)`||
-|`int aeGetSetSize(aeEventLoop *eventLoop)`|获取事件循环的大小|
-|`int aeResizeSetSize(aeEventLoop *eventLoop, int setsize)`|调整事件循环的大小|
+下面我们来看一下其中几个比较重要的函数接口。
 
-其中`aeMain`函数是整个事件循环的主体：
+首先是`aeMain`这个事件驱动的入口函数，其在*Redis*的`main`函数之中被调用：
 ```c
     eventLoop->stop = 0;
     while (!eventLoop->stop) {
