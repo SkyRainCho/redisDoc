@@ -1,76 +1,101 @@
 # Redis中一个基础的事件驱动库
+*Redis*数据库最大的一个特点便是其具有高并发性，可以每秒处理数万次的并发读写操作。除了使用使用单线程以无锁的方式处理核心数据逻辑以避免由于*锁争用*而带来的性能下降之外，*Redis*使用了基于*I/O多路复用*的事件驱动的方式来处理客户端通过网络发送来的请求。而基于*I/O多路复用的*的事件驱动模式正是一种可以高效处理网络并发请求的编程模式。
 
-## 事件驱动库的基础数据结构定义
-首先在*Redis*中注册了四种时间类型:
-|事件|描述|
-|---|----|
-|`#define AE_NONE 0`|没有事件被注册|
-|`#define AE_READABLE 1`|当描述符可读时触发|
-|`#define AE_WRITABLE 2`|当描述符可写时触发|
-|`#define AE_BARRIER 4`|如果在同一个事件循环迭代中，如果有读事件触发，那么即使可写也不触发该事件|
+我们知道默认被创建套接字文件描述符都是阻塞的，例如`accept`、`connect`、`read`、`write`这些函数在操作阻塞文件描述符时，如果期待事件没有发生，那么函数会将程序阻塞直到有新连接到来、连接建立、有数据可读或者缓冲区现在可写，那么频繁地阻塞程序势必造成程序性能的下降。
 
-在*Redis*中，定了两种事件类型，分别是文件事件与时间事件，所谓文件事件类型是指服务器接收客户端的连接，或者是在于客户端建立的连接上的读写操作；而时间事件类型，在当前的*Redis*之中，唯一的时间事件是服务器的心跳逻辑，用于处理服务器的定期操作：
+通过前面对套接字通用接口一文的介绍，我们可以调用`anetNonBlock`接口将一个套接字文件描述符设置成非阻塞，然而这样会出现一个问题，当我们针对一个非阻塞套接字文件描述符调用`accept`等函数时，这些函数总是会立即返回。显然单纯的非阻塞套接字无法提高网络程序的并发性能。
+
+我们期望当有事件就绪的时候在正对非阻塞套接字文件描述符调用对应的函数接口，这样才能够发挥出非阻塞套接字的特性提升系统的并发性能。例如当有连接已经到来的时候，我们在去调用`accept`函数来接收新连接；当一条与客户端的连接上有数据可读的时候，我们在调用`read`函数来读取数据。而*I/O多路复用*正式提供了这样的一种支持，与`accept`、`connect`、`read`、`write`这些函数只能操作单一文件描述符不同，*I/O多路复用*可以同时监听多个文件描述符，通过`select`、`poll`、`epoll_wait`这些调用阻塞等待多个文件描述符，只要其中有一个文件描述符就绪，函数就会返回，我们可以调用对应的事件处理函数来处理不同的事件，这将大大提高服务器的处理效率。
+
+*Redis*对于基于*I/O多路复用*的事件驱动的声明与定义在*src/ae.h*、*src/ae.c*、*src/ae_epoll.c*、*src/ae_ecport.c*、*src/ae_kqueue.c*和*src/ae_select.c*这些文件之中。
+
+## 事件驱动库的基础数据结构定义与描述
+### 枚举类型描述
+#### 事件类型
+*Redis*中，事件驱动需要关注两种事件的处理：
+1. `#define AE_FILE_EVENTS 1`，文件事件，这类事件主要是用于处理服务器与客户端之间的连接，在Linux系统之中”一切皆文件“，而表示一条TCP连接的套接字实际上也是一个文件描述符。
+1. `#define AE_TIME_EVENTS 2`，时间事件，这类事件主要用处理服务器的一些需要周期性被执行的操作。例如服务器心跳处理函数`serverCron`。
+
+#### 可触发事件类型
+首先在*Redis*中注册了四种可触发类型:
+1. `#define AE_NONE 0`，没有事件被注册
+2. `#define AE_READABLE 1`，当描述符可读时触发，对于服务器的监听套接字文件述符，当有新连接到达时，也就是收到客户端发来的**SYN**报文时，文件描述符可读；对于服务器与客户端连接的套接字文件描述符，当内核TCP接收缓冲区中有数据时，文件描述符可读。
+3. `#define AE_WRITABLE 2`，当描述符可写时触发，对于表示连接的套接字文件描述符，当内核TCP发送缓冲区有空余空间时，文件描述符可写；对于客户端调用非阻塞`connect`函数后的套接字文件描述符，当连接正式建立时，文件描述符可写。
+4. `#define AE_BARRIER 4`，如果在同一个事件循环迭代中，如果有读事件触发，那么即使可写也不触发该事件。这在我们期望在发送反馈信息前将某些数据持久化到磁盘上时很有用。
+
+### 数据结构描述
+#### 文件事件类型数据结构
 ```c
 /*文件事件结构体*/
 typedef struct aeFileEvent {
-    int mask; /* one of AE_(READABLE|WRITABLE|BARRIER) */
-    aeFileProc *rfileProc;    //读方法
-    aeFileProc *wfileProc;    //写方法
+    int mask;                 //当前时间监听的可触发事件，AE_READABLE|WRITEABLE|BARRIER
+    aeFileProc *rfileProc;    //处理可读事件的回调函数函数指针
+    aeFileProc *wfileProc;    //处理可写事件的回调函数函数指针
     void *clientData;         //客户端数据
 } aeFileEvent;
+```
+
+#### 时间事件类型数据结构
+```c
 /*时间事件结构体*/
 typedef struct aeTimeEvent {
-    long long id;                         /*时间事件ID*/
-    long when_sec;                        /*触发时间秒数*/
-    long when_ms;                         /*触发时间毫秒*/
-    aeTimeProc *timeProc;                 /*时间事件中的处理函数*/
-    aeEventFinalizerProc *finalizerProc;  /*事件最终被删除时的处理函数*/
-    void *clientData;                     /*客户端数据*/
-    struct aeTimeEvent *prev;             /*双向链表中下一个时间事件*/
-    struct aeTimeEvent *next;             /*双向链表中上一个时间事件*/
+    long long id;                         //时间事件ID
+    long when_sec;                        //触发时间秒数
+    long when_ms;                         //触发时间毫秒
+    aeTimeProc *timeProc;                 //时间事件到期时处理函数的函数指针
+    aeEventFinalizerProc *finalizerProc;  //事件最终被删除时处理函数的函数指针
+    void *clientData;                     //客户端数据
+    struct aeTimeEvent *prev;             //双向链表中前一个时间事件的指针
+    struct aeTimeEvent *next;             //双向链表中后一个时间事件的指针
 } aeTimeEvent;
+```
+#### 触发事件数据结构
+```c
 /*触发事件结构体，用于表示将要被处理的文件事件*/
 typedef struct aeFiredEvent {
-    int fd;        /*文件描述符*/
-    int mask;      /*事件掩码*/
+    int fd;        //被触发事件的文件描述符
+    int mask;      //触发事件的掩码
 } aeFiredEvent;
 ```
 
+### 事件循环数据结构类型
 对于事件循环的基本数据类型
 ```c
 typedef struct aeEventLoop {
-    int maxfd;                   /*目前创建的最高的文件描述符*/
-    int setsize;                 /*用于定义最多可以被追踪的描述符*/
-    long long timeEventNextId;   /*下一个时间事件ID*/
-    time_t lastTime;             /*用于探测系统时钟偏移*/
-    aeFileEvent *events;         /*已被注册的事件*/
-    aeFiredEvent *fired;         /*已经触发的事件*/
+    int maxfd;
+    int setsize;
+    long long timeEventNextId;
+    time_t lastTime;
+    aeFileEvent *events;
+    aeFiredEvent *fired;
     aeTimeEvent *timeEventHead;
-    int stop;                    /*事件停止标志符*/
-    void *apidata;               /*用于Poll的API调用的数据*/
-    aeBeforeSleepProc *beforesleep;    /*每次进入事件循环前执行的函数*/
-    aeBeforeSleepProc *aftersleep;     /*每次事件循环结束后执行的函数*/
+    int stop;
+    void *apidata;
+    aeBeforeSleepProc *beforesleep;
+    aeBeforeSleepProc *aftersleep;
 } aeEventLoop;
 ```
+在上述数据结构之中：
+1. `aeEventLoop.maxfd`，记录当前事件循环之中文件事件类型最大的文件描述符数值。
+1. `aeEventLoop.setsize`，用于记录当前事件循环之中被追踪的文件描述符的数量。
+1. `aeEventLoop.timeEventNextId`，对应于`aeTimeEvent.id`，用于记录下一个时间事件的ID。
+1. `aeEventLoop.lastTime`，对应上次处理时间事件的时间戳。
+1. `aeEventLoop.events`，一个`aeFileEvent`结构体的指针，指向一个动态分配的数组，其长度为`aeEventLoop.setsize`，用于存储所有被注册的文件事件。
+1. `aeEventLoop.fired`，一个`aeFiredEvent`结构体的指针，指向一个动态分配的数组，其长度与`aeEventLoop.events`一致，用于存储从**I/O多路复用**之中返回的已被触发的事件。
+1. `aeEventLoop.timeEventHead`，用于指向存储时间事件双向链表的头指针。
+1. `aeEventLoop.stop`，用于标记事件循环是否终止的标记。
+1. `aeEventLoop.apidata`，用于存储调用底层**I/O多路复用**接口的数据。
+1. `aeEventLoop.beforesleep`，每次进入事件循环前调用函数的函数指针。
+1. `aeEventLoop.aftersleep`，每次退出事件循环后调用函数的函数指针。
 
 ## IO多路复用接口
 *Redis*根据系统所提供的支持，会使用最优的IO多路复用的实现接口：
-|源文件|IO多路复用实现|
-|-----|------------|
-|*src/ae_epoll.c*|对于实现了`epoll`接口的系统，使用`epoll`作为IO多路复用的接口。|
-|*src/ae_kqueue.c*|对于*Mac OS*系统，使用`kqueue`作为IO多路复用的接口。|
-|*src/ae_select.c*|对于老的系统，使用`select`作为IO多路复用的接口。|
+1. *src/ae_epoll.c*，对于实现了`epoll`接口的系统，使用`epoll_wait`作为IO多路复用的接口。
+1. *src/ae_kqueue.c*，对于*Mac OS*系统，使用`kqueue`作为IO多路复用的接口。
+1. *src/ae_select.c*，对于老的系统，使用`select`作为IO多路复用的接口。
 
-而在事件循环的数据结构中：
-```c
-typedef struct aeEventLoop {
-    ...
-    void *apidata;               /*用于Poll的API调用的数据*/
-    ...
-} aeEventLoop;
-```
-这个`apidata`字段会根据系统使用的IO多路复用接口的不同，保存所需要的数据结构。
-对于使用`epoll`的接口，`apidata`这个字段所保存的数据结构为：
+而在事件循环的数据结构中的`aeEventLoop.apidata`这个字段会根据系统使用的IO多路复用接口的不同，保存所需要的数据结构。
+对于使用`epoll`接口，`apidata`这个字段所保存的数据结构为`aeApiState`，其定义为：
 ```c
 typedef union epoll_data
 {
@@ -91,21 +116,24 @@ typedef struct aeApiState {
     struct epoll_event *events;
 } aeApiState;
 ```
-在这些源文件中，定义了一组静态函数，用于封装系统的IO复用接口，供*Redis*事件循环调用：
-|函数声明|定义(以`epoll`系统调用为例)|
-|-------|---|
-|`static int aeApiCreate(aeEventLoop *eventLoop)`|通过调用`epoll_create`创建`epoll`的文件描述符，同时分配`epoll_event`事件队列|
-|`static int aeApiResize(aeEventLoop *eventLoop, int setsize)`|调整事件循环中`epoll_event`队列的大小|
-|`static void aeApiFree(aeEventLoop *eventLoop)`|释放事件循环中，为`epoll`的相关资源|
-|`static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask)`|通过调用`epoll_ctl`系统调用，向内核注册监听一个文件描述符，或者更新一个文件描述符的监听事件|
-|`static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int delmask)`|通过调用`epoll_ctl`系统调用，删除一个已监听文件描述符上的事件，或者删除一个已监听的事件描述符|
-|`static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp)`|该组静态函数的核心，通过调用`epoll_wait`等待监听的文件描述符上事件触发|
+这其中:
+1. `aeApiState.epfd`，是调用`epoll_create`系统调用创建的`epoll`文件描述符，系统可以通过阻塞监听这个文件描述符来监听其他一组文件描述符的状态变化。
+1. `eaApiState.events`，对应于`aeEventLoop.events`这个字段，也是一个动态分配的数组，存储`epoll`监听事件对应的数据结构。
+
+在上述这些源文件中，定义了一组静态函数，用于封装系统的**IO多路复用**接口，供*Redis*事件循环也就是`aeEventLoop`调用(以`epoll`系统调用为例)：
+1. `static int aeApiCreate(aeEventLoop *eventLoop)`，通过调用`epoll_create`创建`epoll`接口的文件描述符，同时为`epoll_event`事件队列分配空间。
+1. `static int aeApiResize(aeEventLoop *eventLoop, int setsize)`，调整事件循环中`epoll_event`队列的大小。
+1. `static void aeApiFree(aeEventLoop *eventLoop)`，释放事件循环中，为`epoll`接口数据分配的相关资源。
+1. `static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask)`，通过调用`epoll_ctl`系统调用，向内核注册监听一个文件描述符，或者更新一个文件描述符的监听事件。
+1. `static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int delmask)`，通过调用`epoll_ctl`系统调用，删除一个已监听文件描述符上的事件，或者删除一个已监听的事件描述符。
+1. `static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp)`，该组静态函数的核心，通过调用`epoll_wait`等待监听的文件描述符上事件触发。
 
 在`aeApiPoll`函数中：
 ```c
+static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
+    aeApiState *state = eventLoop->apidata;
     //阻塞在epoll_wait，等待事件ready
-    retval = epoll_wait(state->epfd,state->events,eventLoop->setsize,
-            tvp ? (tvp->tv_sec*1000 + tvp->tv_usec/1000) : -1);
+    retval = epoll_wait(state->epfd,state->events,eventLoop->setsize, tvp ? (tvp->tv_sec*1000 + tvp->tv_usec/1000) : -1);
     if (retval > 0) {
         int j;
 
@@ -113,7 +141,7 @@ typedef struct aeApiState {
         for (j = 0; j < numevents; j++) {
             int mask = 0;
             struct epoll_event *e = state->events+j;
-            //将从内核中返回的就绪事件提取出出来
+            //将从内核中返回的就绪事件提取出来
             if (e->events & EPOLLIN) mask |= AE_READABLE;
             if (e->events & EPOLLOUT) mask |= AE_WRITABLE;
             if (e->events & EPOLLERR) mask |= AE_WRITABLE;
@@ -123,7 +151,12 @@ typedef struct aeApiState {
             eventLoop->fired[j].mask = mask;
         }
     }
+}
 ```
+使用`epoll`接口实现的`aeApiPoll`函数其主要流程为：
+1. 通过`aeApiAddEvent`函数注册所需要监听的文件描述符。
+1. 通过`epoll_wait`这个系统调会以阻塞的方式等待前面注册的文件描述符上的事件，当有事件就绪，该函数会返回就绪事件的个数。
+1. 通过循环遍历，将内核中返回的就绪事件提取出来，将其复制到*Redis*事件循环的已触发事件队列`aeEventLoop.fired`上面。
 
 ## 事件循环接口函数定义
 
