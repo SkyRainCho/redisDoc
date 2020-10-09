@@ -180,8 +180,9 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
 
 下面我们来看一下其中几个比较重要的函数接口。
 
-首先是`aeMain`这个事件驱动的入口函数，其在*Redis*的`main`函数之中被调用：
+首先是`aeMain`这个事件驱动的入口函数，其在*Redis*的`main`函数之中被调用，用以启动事件循环：
 ```c
+void aeMain(aeEventLoop *eventLoop) {
     eventLoop->stop = 0;
     while (!eventLoop->stop) {
         //如果调用aeSetBeforeSleepProc设置了beforesleep回调，那么在启动一次事件循环开启时，会执行beforesleep调用
@@ -190,8 +191,9 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
         //启动一次事件循环，处理文件事件以及时间事件，同时会尝试调用aftersleep
         aeProcessEvents(eventLoop, AE_ALL_EVENTS|AE_CALL_AFTER_SLEEP);
     }
+}
 ```
-而`aeProcessEvents`函数是处理一次事件循环的主体，处理每个待处理的时间事件，然后处理每个待处理的文件事件（可以通过刚刚处理的时间事件回调来注册）。 没有特殊标志的情况下，该函数将一直休眠，直到引发某些文件事件或下次发生事件（如果有）时为止。
+这其中`aeProcessEvents`函数是处理一次事件循环的主体，处理每个待处理的时间事件，然后处理每个待处理的文件事件（可以通过刚刚处理的时间事件回调来注册）。 没有特殊标志的情况下，该函数将一直休眠，直到引发某些文件事件或下次发生事件（如果有）时为止。
 * 如果`flags`为0，则该函数不执行任何操作并返回。
 * 如果`flags`设置了`AE_ALL_EVENTS`，则处理所有类型的事件。
 * 如果`flags`设置了`AE_FILE_EVENTS`，则处理文件事件。
@@ -199,10 +201,10 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
 * 如果`flags`设置了`AE_DONT_WAIT`，则该函数将尽快返回直到所有。
 * 如果`flags`设置了`AE_CALL_AFTER_SLEEP`，则将调用`aftersleep`回调，这些事件可能无需等待就可以处理。
 
-该函数返回已处理事件的数量。
+这个函数会返回已处理事件的数量。
 
-其基本流程为：
-1. 确定`aeApiPoll`等待的`timeval`，而这段逻辑可以保证，在即使没有文件事件触发的情况下，`aeApiPoll`仍然可以在最近的一次计时器时间事件到来之前返回，而不会错过对后续时间事件的处理。其具体逻辑为：
+`aeProcessEvents`函数的基本流程为：
+1. 通过调用`aeSearchNearestTimer`这个静态函数来找到最近一个要到期的时间时间，获取其到期时间以确定`aeApiPoll`等待的`timeval`，这段逻辑可以保证，在即使没有文件事件触发的情况下，`aeApiPoll`仍然可以在最近的一次计时器时间事件到来之前返回，而不会错过对后续时间事件的处理。其具体实现代码为：
 ```c
     //如果设置了AE_TIME_EVENTS标记，同时没有设置AE_DONT_WAIT，搜索最近的时间事件
     if (flags & AE_TIME_EVENTS && !(flags & AE_DONT_WAIT))
@@ -224,7 +226,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     }
 ```
 
-2. 调用封装的`aeApiPoll`多路复用API，等待事件触发，或者超时，或返回触发的时间数量：
+2. 调用封装的`aeApiPoll`这个核心**I/O多路复用**API，等待文件事件上的时间触发触发返回被触发事件的数量，或者超时进入时间事件的处理流程：
 ```c
     numevents = aeApiPoll(eventLoop, tvp);
 ```
@@ -267,9 +269,10 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
         processed += processTimeEvents(eventLoop);
 ```
 
-`processTimeEvents`函数，则会处理事件循环之中的由定时器触发的时间事件。其基础逻辑为：
-1. 尝试修正触发时间事件
+现在我们来看一下处理时间事件的`processTimeEvents`函数，其基础逻辑为：
+1. 如果系统的时钟曾经被移动到未来，那么在再次处理时间事件时，需要尝试对时钟进行修正。同时当这种情况发生时，*Redis*将会强制处理所有队列之中时间事件，通过将`aeTimeEvent.when_sec`设置为0来实现强制提前处理，*Redis*的作者认为当系统时间出现错位时，提早处理时间事件要比延后处理这些事件更为安全。
 ```c
+    time_t now = time(NULL);
     if (now < eventLoop->lastTime) {
         te = eventLoop->timeEventHead;
         while(te) {
@@ -277,10 +280,9 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
             te = te->next;
         }
     }
+    eventLoop->lastTime = now;
 ```
-2. 从双向链表中删除已近被调度过的，同时被设置为`AE_DELETED_EVENT_ID`的时间事件，
-如果这个时间时间被设置了`finalizerProc`回调，那么在释放这个时间事件之前，会调用
-`finalizerProc`来处理相关释放逻辑：
+2. 从双向链表中删除已近被调度过的，同时被设置为`AE_DELETED_EVENT_ID`的时间事件，如果这个时间时间被设置了`finalizerProc`回调，那么在释放这个时间事件之前，会调用`finalizerProc`来处理相关释放逻辑：
 ```c
     while(te) {
         ...
@@ -319,6 +321,8 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
         te = te->next;
     }
 ```
+
+最后我们来看一下`aeWait`这个函数接口，这个函数会调用`poll`这个**I/O多路复用**接口来等待给定的文件描述符若干毫秒，这个函数接口是在`aeMain`之外的另外一个将程序阻塞的接口，两者的区别在于`aeMain`函数阻塞等待多个文件描述符，而`aeWait`函数只能阻塞给定的文件描述符。为何*Redis*在`aeMain`的基础上还要实现一个`aeWait`接口呢？这个接口主要用于*Redis*的一些同步阻塞操作，例如在*Master*实例与*Slave*实例之间使用**SYNC**命令以同步阻塞的方式同步数据。
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
