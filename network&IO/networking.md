@@ -182,8 +182,62 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
 ```
 这里在完成`client.querybuf`的写入之后，会检查缓冲区的大小，如果超过了系统的限制`redisServer.client_max_querybuf_len`，这意味着这个客户端有可能处于一种异常的状态，这是需要将这个异常的客户端对象释放掉。而`readQueryFromClient`在完成将内核数据写入应用层缓冲区之后，会调用`processInputBufferAndReplicate`来解析缓冲区中的命令数据。
 
-对于一个普通的客户端，`processInputBufferAndReplicate`实际上是调用`processInputBuffer`这个函数来处理应用层输入缓冲区中的数据将其解析成命令的格式
+对于一个普通的客户端，`processInputBufferAndReplicate`实际上是调用`processInputBuffer`这个函数来处理应用层输入缓冲区中的数据将其解析成命令的形式。这里*Redis*所能处理的命令的由两种形式，通过客户端的`client.reqtype`字段来标记具体的命令协议类型，以命令`SET key newvalue`为例：
+1. `#define PROTO_REQ_INLINE 1`，对于这种协议格式，前面的命令将会以`SET key newvalue\r\n`的实行在网络上进行传输，也就是说每一条命令都是以单行的形式编码的。
+1. `#define PROTO_REQ_MULTIBULK 2`，而这种协议格式则会将命令编码成多行的形式，同时以`*`作为命令的起始字符，那么前面的命令使用这种协议格式的话，则编码后的内容为`*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$8\r\nnewvalue\r\n`。也就是说每一行便是一个字段，`*`以及后面的数字标记了该条命令参数的个数；`$`以及后面的数字则标记了后面参数数据的长度，基于上述的规则，便可以从客户端传送的数据之中解析出命令的参数内容。这种形式与前面`PROTO_REQ_INLINE`相比，由于携带了参数个数以及各个参数数据的长度信息，因此是二进制安全的，可以用于更为复杂的命令数据的传输。
+
+而下面这两个函数便是分别用于解析上述两种协议格式的数据：
+```c
+int processInlineBuffer(client *c);
+int processMultibulkBuffer(client *c);
+```
+这两个函数会按照上面的规则从客户端的应用层缓存`client.querybuf`之中尝试解析数据，并将解析出来的命令参数赋值给`client.argc`以及`client.argv`字段之中。如果应用层缓存之中的数据不足以构成一条完整的命令时，则上述两个函数会返回`C_ERR`，客户端会重新进入事件循环，继续等待客户端的输入。如果应用层缓冲区之中可以解析出完整的命令，那么函数会返回`C_OK`，不过需要注意的是，如果缓冲区中的数据可以解析成多个命令时，这两个函数每次调用也只会解析出一个命令。
+
+那么现在可以看一下，解析客户端输入数据的`processInputBuffer`接口的实现细节。
+```c
+void processInputBuffer(client *c) {
+    server.current_client = c;
+    while (c->qp_pos < sdslen(c->querybuf)) {
+        ...
+        if (!c->reqtype) {
+            if (c->querybuf[c->qb_pos] == '*') {
+                c->reqtype = PROTO_REQ_MULTIBULK;
+            } else {
+                c->reqtype = PROTO_REQ_INLINE;
+            }
+        }
+
+        if (c->reqtype == PROTO_REQ_INLINE) {
+            if (processInlineBuffer(c) != C_OK) break;
+        } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
+            if (processMultibulkBuffer(c) != C_OK) break;
+        } else {
+            serverPanic("Unknown request type");
+        }
+        if (c->argc == 0)
+        {
+            resetClient(c);
+        } else {
+            processCommand(c);
+        }
+    }
+    if (server.current_client != NULL && c->qb_pos) {
+        sdsrange(c->querybuf,c->qb_pos,-1);
+        c->qb_pos = 0;
+    }
+    server.current_client = NULL;
+}
+```
+通过上面的代码片段，我们可以发现推断出如果客户端应用层缓存之中累计了多条命令的数据，那么`processInputBuffer`函数会循环处理累积的每一条命令，直到所有可以被处理的命令都被处理完成为止，才会切换到下一个客户端的处理。
+
 ### 执行客户端命令
+完成了客户端命令参数的解析之后，我们便可以下面这个函数完成命令的执行过程：
+```c
+int processCommand(client *c);
+```
+当执行完命令之后，如果客户端依然可用且合法，那么函数会返回`C_OK`；则函数会返回`C_ERR`，例如通过**QUIT**命令关闭释放客户端。这里需要注意的是，`client.argv`中的第一个参数便是所执行的客户端命令的命令名称。
+
+对于*Redis*命令的具体细节，将会在后面的文章之中进行详细介绍。
 
 ## 客户端数据输出过程
 
