@@ -286,6 +286,52 @@ void addReplyMultiBulkLen(client *c, long length);
 void addReplyHelp(client *c, const char **help);
 ```
 上述这些函数的具体实现细节大致上都是一致的，因此我们不做过多的描述，我们仅就一个通用的客户端输出过程进行介绍。
+所有的客户端输出逻辑都是一个异步的过程，`addReplyXXX`这一系列函数在将需要输出的数据写入客户端输出缓冲区之前，需要通过`prepareClientToWrite`这个函数接口对应的客户端对象加入服务器的输出列表`redisServer.clients_pending_write`，等待后续将数据异步地输出到网络上，例如`addReply`这个函数接口：
+```c
+void addReply(client *c, robj *obj)
+{
+    if (prepareClientToWrite(c) != C_OK) return;
+    ...
+    if (_addReplyToBuffer(c, obj->ptr, sdslen(obj->pyr)) != C_OK)
+        _addReplyStringToList(c, obj->ptr, sdslen(obj->ptr));
+
+    ...
+}
+```
+
+那么*Redis*服务器是在何时将这些被挂起客户端的输出缓冲区中数据发送到网络上的呢？通过代码我们可以发现，*Redis*会在每次进入事件循环等待之前的`beforeSleep`接口中，尝试将`redisServer.clients_pending_write`里的客户端的输出数据发送到网络上：
+```c
+void before(struct aeEventLoop *eventLoop)
+{
+    UNUSED(eventLoop);
+    ...
+    handleClientsWithPendingWrites();
+    ...
+}
+```
+这里`handleClientsWithPendingWrites`便是*Redis*整个输出逻辑的核心，简单来说*Redis*当使用`epoll`系统调用的作为底层事件驱动的实现时，采用的是**水平触发**的模式，也就是`handleClientsWithPendingWrites`会遍历`redisServer.clients_pending_write`中的每一个客户端，对每一个客户端对象调用`writeToClient`函数接口，将客户端输出缓冲区之中的数据通过`write`系统调用发送到网络连接上。如果对应TCP连接的内核写缓冲区空间不足导致无法接收应用层缓存中数据的话，那么为这个客户端在事件循环之中注册一个可写事件以及相应的事件处理函数`sendReplyToClient`。当TCP连接的对端确认接收数据之后，该客户端会触发可写事件，此时*Redis*会调用`sendReplyToClient`函数，继续将客户端应用层缓冲区的数据通过`write`系统调用写入内核。
+```c
+int handleClientWithPendingWrites(void) {
+    listIter li;
+    listNode *ln;
+    
+    listRewind(server.clients_pending_write, &li);
+    while ((ln = listNext(&li))){
+        client *c = listNodeValue(ln);
+        listDelNode(server.clients_pending_write, ln);
+        ...
+        if (writeToClient(c->fd, c, 0) == C_ERR) continue;
+        
+        if (clientHasPendingReplies(c))
+        {
+            ...
+            aeCreateFileEvent(server.el, c->fd, ae_flags, sendReplyToClient, c);
+            ...
+        }
+    }
+    ...
+}
+```
 ## 客户端关闭释放过程
 
 
