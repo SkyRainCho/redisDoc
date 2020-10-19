@@ -240,8 +240,52 @@ int processCommand(client *c);
 对于*Redis*命令的具体细节，将会在后面的文章之中进行详细介绍。
 
 ## 客户端数据输出过程
+在了解客户端输出过程前，我们还是依照惯例来看一下客户端结构体之中关于数据输出的相关字段。*Redis*所有发送给客户端的数据都会被写入到客户端对象的输出缓冲区之中，然后在通过TCP连接发送给用户。客户端对象中的输出缓冲区分为两种，第一种是一个固定长度的输出缓冲区，用于输出长度较小的数据：
+```c
+typedef struct client {
+    ...
+    int bufpos;
+    char buf[PROTO_REPLY_CHUNK_BYTES];
+    ...
+};
+```
+客户端的这个固定长度的缓冲区的大小为16K；另外客户端还有一个边长的输出缓冲区，而这个缓冲区则是以双端链表形式存储的，当输入过大固定缓冲区无法存储时，缓存输出数据。
+```c
+typedef struct client {
+    ...
+    list *reply;
+    unsigned long long reply_bytes;
+    size_t sentlen;
+    ...
+};
+```
+*Redis*通过下面这两个底层接口，将数据写到客户端的输出缓冲区之中：
+```c
+int _addReplyToBuffer(client *c, const char *s, size_t len);
+void _addReplyStringToList(client *c, const char *s, size_t len);
+```
+这两个函数中`_addReplyToBuffer`用于将数据写入客户端的固定长度缓冲区之中，如果数据可以成功写入，那么函数会返回`C_OK`，如果数据长度超过了定长缓冲区的容量，或者在变长缓冲区之中已经存在数据，那么该函数不会讲述如写入，而函数会返回`C_ERR`。而函数`_addReplyStringToList`则是用于将数据写入客户端的变长缓冲区之中，同时在`_addReplyToBuffer`尝试向定长缓冲区写入失败后调用该函数。
 
-
+在上述两个函数的基础上，*Redis*提供了一组用于向客户端输出数据的函数接口：
+```c
+void addReplyString(client *c, const char *s, size_t len);
+void AddReplyFromClient(client *c, client *src);
+void addReplyBulk(client *c, robj *obj);
+void addReplyBulkCString(client *c, const char *s);
+void addReplyBulkCBuffer(client *c, const void *p, size_t len);
+void addReplyBulkLongLong(client *c, long long ll);
+void addReply(client *c, robj *obj);
+void addReplySds(client *c, sds s);
+void addReplyBulkSds(client *c, sds s);
+void addReplyError(client *c, const char *err);
+void addReplyStatus(client *c, const char *status);
+void addReplyDouble(client *c, double d);
+void addReplyHumanLongDouble(client *c, long double d);
+void addReplyLongLong(client *c, long long ll);
+void addReplyMultiBulkLen(client *c, long length);
+void addReplyHelp(client *c, const char **help);
+```
+上述这些函数的具体实现细节大致上都是一致的，因此我们不做过多的描述，我们仅就一个通用的客户端输出过程进行介绍。
 ## 客户端关闭释放过程
 
 
