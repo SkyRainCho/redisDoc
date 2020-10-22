@@ -1,6 +1,6 @@
-# Redis命令
+# Redis命令支持
 
-在了解*Redis*命令执行之前，我们先来看一下代表*Redis*命令的结构体数据：
+在了解*Redis*命令执行之前，我们先来看一下代表*Redis*命令的结构体的定义，在*src/server.h*这个头文件中：
 ```c
 typedef void redisCommandProc(client *c);
 typedef int *redisGetKeysProc(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);
@@ -17,6 +17,8 @@ struct redisCommand {
     long long microseconds, calls;
 };
 ```
+首先讲解一下，这个结构体中常用的字段的含义：
+1. `redisCommand.name`
 在*Redis*服务器全局数据中，使用一个哈希表存储了所有的*Redis*命令，使用命令名作为哈希表的*Key*用来索引`redisCommand`数据：
 ```c
 struct redisServer {
