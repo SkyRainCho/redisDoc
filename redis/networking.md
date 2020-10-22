@@ -289,6 +289,39 @@ int handleClientWithPendingWrites(void) {
 ```
 ## 客户端关闭释放过程
 
+### 客户端的异步释放
+```c
+void freeClientAsync(client *c);
+void freeClientInAsyncFreeQueue(clinet *c);
+void asyncCloseClientOnOutputBufferLimitReached(client *c);
+```
+在服务器全局变量中`redisServer.clients_to_close`存储了需要被异步地关闭的客户端对象的指针。通过`freeClientAsync`这个函数接口，*Redis*可以将一个客户端对象数据插入`redisServer.clients_to_close`这个双端链表之中。而在服务器的心跳函数`serverCron`中调用`freeClientInAsyncFreeQueue`这个接口，将`redisServer.clients_to_close`中的客户端依次进行释放。主要需要执行异步释放客户端的情况有两种：
+1. 当调用`_addReplyStringToList`向客户端的应用层输出缓存中写入数据之后，如果该客户端的输出缓存的长度超过了系统的最大上限，那么`asyncCloseClientOnOutputBufferLimitReached`函数会将这个客户端加入到`redisServer.clients_to_close`链表之中。
+1. 在`writeToClient`函数中，如果向事件循环中注册对应客户端的可写事件失败，那么也会调用`freeClientAsync`接口，将客户端对象的指针加入到服务器的异步释放队列之中。
+
+### 客户端的同步释放
+```c
+int clientsCronHandleTimeout(client *c, mstime_t now_ms);
+void freeClient(client *c);
+```
+*Redis*服务器的同步释放逻辑之中，主要有两种应用场景：
+1. 首先便是对长时间没有操作的客户端，*Redis*会在服务器心跳中，通过`cleintsCronHandleTimeout`函数来计算每一个客户端的当前空闲时间，通过当前时间与`client.lastinteraction`时间戳的差值进行计算。如果这个空闲时间大于服务器设置的最大客户端空闲时间上限`redisServer.maxidletime`，那么会调用`freeClient`函数接口直接将这个空闲的客户端对象释放掉。
+1. 另外一种同步的释放方式，是客户端主动调用**QUIT**指令执行关闭流程。当客户端执行**QUIT**命令时，*Redis*会为这个客户端对象的标志字段上设置一个`CLIENT_CLOSE_AFTER_REPLY`掩码，在*Redis*将这个客户端的所有应用层缓存数据都发送到网络后，会调用`freeClient`接口将这个客户端对象同步地释放掉。
+```c
+int writeToClient(int fd, client *, int handler_installed)
+{
+    ...
+    if (!clientHasPendingReplies(c))
+    {
+        if (c->flags & CLIENT_CLOSE_AFTER_REPLY) {
+            freeClient(c);
+            return C_ERR;
+        }
+    }
+    return C_OK;
+}
+```
+
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
