@@ -95,10 +95,70 @@ int processCommand(client *c);
 ```
 3. 如果服务器开启了集群`redisServer.cluster_enabled`，那么执行集群重定向。
 4. 如果服务器配置了最大内存上限`redisServer.maxmemory`，则会通过`freeMemoryIfNeededAndSafe`接口检测并执行内存淘汰的逻辑，淘汰机制的具体内容，可以参考前面的文章进行回顾。
+```c
+    if (server.maxmemory && !server.lua_timeout)
+    {
+        int out_of_memory = freeMemoryIfNeedAndSafe() == C_ERR;
+        ...
+    }
+```
 5. 如果当前服务器磁盘出现了问题，导致无法对数据进行持久化，那么会拒绝执行`CMD_WRITE`标记的写入命令。
 6. 在*Master-Slave*模式下，如果**Master**实例没有足够的可用**Slave**实例，那么会拒绝执行写入命令。
 7. 如果是只读的**Slave**实例，同样禁止执行写入命令。
 8. 如果当前客户端处于订阅模式`c->flags & CLIENT_PUBSUB`，那么只允许执行**PING**、**PING**、**SUBSCRIBE**、**UNSUBSCRIBE**、**PSUBSCRIBE**、**PUNSUBSCRIBE**这几个特定的命令。
+9. 判断如果服务器处于加载状态，那么只能执行具有`CMD_LOADING`标记的命令。
+10. 如果Lua脚本执行过慢，那么只允许指定特定的几个命令**AUTH**，**REPLCONF**，**SHUTDOWN**。
+
+在完成了上述的前置条件判断之后，我们便可以进入命令的具体形式过程，*Redis*通过`call`这个函数接口，执行给定客户端上绑定的命令处理函数：
+```c
+void call(client *c, int flags);
+```
+这个函数接口是*Redis*执行命令的核心，`flags`参数是命令的执行标记，可以选择的标记有：
+1. `CMD_CALL_NONE`，没有任何标记，不执行任何额外行为。
+1. `CMD_CALL_SLOWLOG`，检查命令的执行速度，如果需要的话会将这条命令记录到慢日志之中
+1. `CMD_CALL_STATS`，会对命令进行统计。
+1. `CMD_CALL_PROPAGATE_AOF`，如果命令修改了数据库，那么会将这个命令追加到**AOF**文件之中。
+1. `CMD_CALL_PROPAGATE_REPL`，如果命令修改了数据库，那么会将这个命令发送到**Slave**实例节点上。
+1. `CMD_CALL_PROPAGATE`，这个标记相当于`CMD_CALL_PROPAGATE_AOF|CMD_CALL_PROPAGATE_REPL`。
+1. `CMD_CALL_FULL`，这个是一个更加全面的标记，相当于`CMD_CALL_PROPAGATE|CMD_CALL_STATS|CMD_CALL_SLOWLOG`。
+
+接下来，我们可以来看一下`call`这个函数接口执行客户端命令的具体细节：
+```c
+void call(client *c, int flags)
+{
+    ...
+    //执行命令，并记录消耗时间已经是否引起数据库键空间中数据的变化
+    dirty = server.dirty;
+    start = server.ustime;
+    c->cmd->proc(c);
+    duration = ustime() - start;
+    drity = server.dirty - dirty;
+
+    //如果设置了CMD_CALL_SLOWLOG标记，那么如果需要的话，将其记录到系统慢日志之中
+    if (flags & CMD_CALL_SLOWLOG)
+    {
+        char *latency_event = (c->cmd->flags & CMD_FAST) ? "fast-command" : "command";
+        latencyAddSampleIfNeeded(latency_event,duration/1000);
+        slowlogPushEntryIfNeeded(c,c->argv,c->argc,duration);
+    }
+
+    //如果设置了CMD_CALL_STATS，那么更新该命令的总用时以及执行次数
+    if (flags & CMD_CALL_STATS)
+    {
+        real_cmd->microseconds += duration;
+        real_cmd->calls++;
+    }
+
+    //如果设置了了CMD_CALL_PROPAGATE，那么将该命令追加到AOF文件中并发送给Slave示例
+    if (flags & CMD_CALL_PROPAGATE)
+    {
+        ...
+        propagate(c->cmd,c->db->id,c->argv,c->argc,propagate_flags);
+    }
+}
+```
+以上便是`call`接口执行用户命令的全部流程。
+
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
