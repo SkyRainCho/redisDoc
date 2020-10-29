@@ -82,6 +82,33 @@ int pubsubSubscribePattern(client *c, robj *pattern);
 
 我们可以看到，无论是在客户端数据中，还是在服务器数据之中，订阅的频道信息以及模式信息都是分别存储在两个独立的数据结构之中的，这也就解释前面所说的订阅频道与订阅模式是相互独立的这一点。
 
+另外我们以订阅频道命令**SUBSCRIBE**为例，看一下其对应的命令实现函数：
+```c
+void subscribeCommand(client *c)
+{
+    int j;
+    for (j = 1; j < c->argc, j++)
+        pubsubSubScribeChannel(c, c->argv[j]);
+    c->flags |= CLIENT_PUBSUB;
+}
+```
+这里我们可以看到，当执行一个订阅命令时，会为客户端设置一个`CLIENT_PUBSUB`标记，表明该客户端处于订阅的状态。处于状态的客户端只能够执行**PING**，**SUBSCRIBE**，**UNSUBSCRIBE**，**PSUBSCRIBE**，**PUNSUBSCRIBE**这几个特定的命令，其他命令则被拒绝执行：
+```c
+int processCommand(client *c)
+{
+    ...
+    if (c->flags & CLIENT_PUBSUB &&
+        c->cmd->proc != pingCommand &&
+        c->cmd->proc != subscribeCommand &&
+        c->cmd->proc != unsubscribeCommand &&
+        c->cmd->proc != psubscribeCommand &&
+        c->cmd->proc != punsubscribeCommand) {
+        addReplyError(c, "only (P)SUBSCRIBE / (P)UNSUBSCRIBE / PING / QUIT allowed in this context");
+        return C_OK;
+    }
+}
+```
+
 而取消订阅，*Redis*是使用下面的四个函数来实现单独取消以及全部取消的功能：
 ```c
 int pubsubUnsubscribeChannel(client *c, robj *channel, int notify);
@@ -100,6 +127,8 @@ void freeClient(client *c) {
     ...
 }
 ```
+
+在执行取消订阅命令时，会将客户端上的`CLIENT_PUBSUB`标记移除，以便客户端能够执行后续的其他命令。
 
 最后，我们来看一下*Redis*用于在频道上发布消息的接口：
 ```c
