@@ -25,7 +25,9 @@
 #define BLOCKED_NUM     6    //阻塞状态的个数
 ```
 
-*Redis*服务器全局变量中关于阻塞操作的相关字段：
+*Redis*用于维护阻塞状态相关的内容主要分布在服务器全局变量、数据库键空间定义以及客户端对象结构体之中。
+
+首先我们看一下*Redis*服务器全局变量中关于阻塞操作的相关字段：
 ```c
 struct readyList
 {
@@ -45,9 +47,11 @@ struct redisServer{
 在上述这些结构体字段之中：
 1. `redisServer.blocked_clients`以及`redisServer.blocked_client_by_type`这两个字段分别用于记录当前处于阻塞状态的客户端对象的数量，以及按照`BLOCKED_XXX`分组的被阻塞客户端对象的数量。
 1. `redisServer.unblocked_clients`则是一个存储`client`对象指针的双端链表，用于保存当前处于`CLIENT_UNBLOCKED`状态的客户端的列表。
-1. 
+1. `redisServer.ready_keys`是一个存储`readyList`结构体的双端链表，用于存储当前整个*Redis*之中已经就绪可以返回给被阻塞客户端的键的集合，这个每一个`readyList`对应一个就绪的键：
+    1. `readyList.db`，表示这个就绪的键对应的数据库。
+    1. `readyList.key`，表示这个就绪的键的内容。
 
-数据库中与阻塞操作相关的字段：
+数据库键空间中与阻塞操作相关的字段：
 ```c
 struct redisDb {
     ...
@@ -55,6 +59,9 @@ struct redisDb {
     dict *ready_keys;
 };
 ```
+上述这两个字段里：
+1. `redisDb.blocking_keys`，这是一个哈希表对象，实现了键到一组客户端链表的映射，表示当前
+1. `redisDb.ready_keys`
 
 而在客户端对象结构体`client`中与阻塞操作相关的字段为：
 ```c
