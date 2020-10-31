@@ -60,19 +60,10 @@ struct redisDb {
 };
 ```
 上述这两个字段里：
-1. `redisDb.blocking_keys`，这是一个哈希表对象，实现了键到一组客户端链表的映射，表示当前
-1. `redisDb.ready_keys`
+1. `redisDb.blocking_keys`，这是一个哈希表对象，实现了键到一组客户端链表的映射，表示记录当前数据库键空间之中被等待就绪的键以及对应阻塞在该键上的客户端列表。
+1. `redisDb.ready_keys`，这是一个作为集合使用哈希表，就用表示当前数据库键空间之中此时就绪的键。
 
 而在客户端对象结构体`client`中与阻塞操作相关的字段为：
-```c
-struct client {
-    ...
-    int btype;
-    blockingState bpop;
-};
-```
-
-这里`blockingState`这个结构体的定义为：
 ```c
 struct blockingState {
     mstime_t timeout;
@@ -80,7 +71,61 @@ struct blockingState {
     robj *target;
     ...
 };
+
+struct client {
+    ...
+    int btype;
+    blockingState bpop;
+};
 ```
+其中各个字段的含义为：
+1. `client.btype`，用于记录当前客户端对象的阻塞类型，`BLOCKED_XXX`。
+1. `client.bpop`，用于记录当前客户端对象在阻塞状态之中的一些参数数据：
+    1. `blockingState.timeout`，用于记录阻塞操作的等待时间，如果为0则是会一直等待下去直到就绪为止。
+    1. `blockingState.keys`，用于记录当前客户端阻塞等待键，类似**BLPOP**这样的命令可以阻塞多个键，因此这里使用一个哈希表来进行存储。
+    1. `blockingState.target`，阻塞操作的目标对象，类似**BRPOPLPUSH**这样的命令需要提供目标键，对于这样的命令或者操作，会将目标键存储在这个字段之中。
+
+介绍完*Redis*阻塞操作的相关数据结构支持之后，我们下面来详细介绍一下阻塞操作的相关业务逻辑。
+
+首先我们看一下，客户端进入阻塞状态的通用接口
+```c
+void blockClient(client *c, int btype);
+void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeout, robj *target, streamID *ids);
+```
+以**BRPOP**命令和**BLPOP**命令为例：
+```c
+void blockingPopGenericCommand(client *c, int where) {
+    robj *o;
+    mstime_t timeout;
+    if (getTimeoutFromObjectOrReply(c,c->argv[c->argc-1],&timeout,UNIT_SECONDS) != C_OK) return;
+    ...
+    //如果列表对象为空或者键不存在，那么必须通过blockForKeys接口阻塞客户端
+    blockForKeys(c,BLOCKED_LIST,c->argv + 1,c->argc - 2,timeout,NULL,NULL);
+}
+```
+通过上面的代码片段以及其他类似命令的实现函数，我们可以知道所有的阻塞相关命令都是通过上面`blockForKeys`这个接口为客户端设置阻塞状态的。这个函数接口会让客户端阻塞等待指定的键就绪，并设置指定的等待时间，它将为`client.bpop.timeout`以及`client.bpop.target`字段进行复制，并将被等待的键加入到客户端的`client.bpop.keys`这个哈希表中，同时将这个客户端插入到数据库键空间`redisDb.blocking_keys`对应键的等待列表的尾部；最终调用`blockClient`这个接口为客户端设置上`CLIENT_BLOCKED`这个标记，并更新服务器全局数据中关于阻塞客户端的计次`redisServer.blocked_clients`以及`redisServer.blocked_clients_by_type`。
+
+下面在来看一下客户端退出阻塞状态的逻辑，首先需要明确的一点是客户端可以通过两种方式退出阻塞状态，分别是到达等待的超时间`client.bpop.timeout`以及所等待的键就绪。
+
+那么我们先来看一下等待超时的情况。
+前面在介绍客户端的内容是，我们介绍过`clientsCronHandleTimeout`这个函数接口：
+```c
+int clientsCronHandleTimeout(client *c, mstime_t now_ms)
+{
+    time_t now = now_ms/1000;
+    ...
+    if (c->flags & CLIENT_BLOCKED)
+    {
+        if (c->bpop.timeout != 0 && c->bpop.timeout < now_ms) {
+            replyToBlockedClientTimeOut(c);
+            unblockedClient(c);
+        }
+        ...
+    }
+    ...
+}
+```
+应用这个接口，我们可以关闭空闲时间过长的客户端，同时这个函数还会处理阻塞状态等待超时的情况，也就是当客户端拥有`CLIENT_BLOCKED`时，如果`client.bpop.timeout`这个超时时间非0且小于当前时间的话，那么就会通过`ublickedClient`这个接口接触客户端的阻塞状态。
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
