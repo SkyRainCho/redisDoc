@@ -160,7 +160,73 @@ int processCommand(client *c)
     ...
 }
 ```
-上面这段代码，便是*Redis*调用`handleClientsBlockedOnKeys`函数的具体场景。
+上面这段代码，便是*Redis*调用`handleClientsBlockedOnKeys`函数的具体场景。现在我们以及列表对象上的阻塞操作为例，看一下这个函数的实现逻辑：
+```c
+void handleClientsBlockedOnKeys(void)
+{
+    while(listLength(server.ready_keys) != 0)
+    {
+        list *l;
+        l = sever.ready_keys;
+        server.ready_keys = listCreate();
+
+        while(listLength(l) != 0) {
+            listNode *ln = listFirst(l);
+            readyList *rl = ln->value;
+
+            dictDelete(rl->db->ready_keys, rl->key);
+
+            robj *o = lookupKeyWrite(rl->db, rl->key);
+
+            if (o != NULL && o->type == OBJ_LIST)
+            {
+                dictEntry *de;
+
+                de = dictFind(rl->db->blocking_keys, rl->key);
+                if (de) {
+                    list *clients = dictGetVal(de);
+                    int numclients = listLength(clients);
+
+                    while (numclients--)
+                    {
+                        listNode *clientnode = listFirst(clients);
+                        client *receiver = clientnode->value;
+
+                        if (receiver->btype != BLOCKED_LIST)
+                        {
+                            listDelNode(clients, clientnode);
+                            listAddNodeTail(clients, receiver);
+                            continue;
+                        }
+                        ...
+                    }
+                }
+            }
+
+        }
+        listRelease(l);
+    }
+}
+```
+这个函数在每次执行完客户端命令时，会遍历所有服务器全局数据之中已就绪的键`redisServer.ready_keys`，对于其中每一个就绪的键，会从对应的数据库键空间阻塞列表之中，找到阻塞等待这个键的客户端列表，按照先进先出的策略，将这个就绪的键通知给列表之中最早等待的客户端，这是一个相对公平的分配方案，之所以是相对公平，是因为如果客户端列表中头部的客户端可能等待有序集合类型的键，然而当前就绪键的类型是列表类型，对于这种情况，*Redis*便会就将列表头部的客户端转移到列表的尾部，这就是会造成一定程度不公平的原因所在。
+
+另外通过代码，我们发现在`handleClientsBlockedOnKeys`实现逻辑中，实质上是对`redisServer.ready_keys`中的数据进行了两层嵌套的遍历，之所以这样做是因为列表对象具有一个**BRPOPLPUSH**命令，该命令会阻塞等待某个给定的列表对象类型键，从中弹出一个数据之后将弹出数据插入到另外一个列表对象类型的键之中。详细一个场景，一个客户端X阻塞等待列表A，并期待将列表A中弹出数据插入列表B；而另外一个客户端Y则阻塞等待列表B，而恰好列表A和B都是空的列表，这时如果向A列表中压入一个元素，则会导致两个客户端都被接触阻塞状态。这种连锁接触阻塞的逻辑便是通过代码中双层嵌套的遍历来实现的：
+1. 第一轮遍历，将就绪的列表A通知给客户端X，客户端X弹出数据之后，将数据压入列表B，导致列表B被加入`redisServer.ready_keys`之中。
+1. 第二轮遍历，将就绪的列表B通知给客户端Y。
+
+最后，我们看一下，对解锁客户端的处理逻辑，前面我们已经介绍到，客户端在处于阻塞状态时，其客户端应用层缓存依然会接受连接上发送来的数据，那么在接触客户端的阻塞状态时，我们有必要对客户端应用层缓存之中的数据进行及时的处理。
+```c
+void unblockClient(client *c);
+void queueClientForReprocessing(client *c);
+```
+*Redis*会通过`unblockClient`接口接触客户端的阻塞状态并清理相关的数据，其中最重要的一点是解除客户端`client.flags`上的`CLIENT_BLOCKED`阻塞状态标记，然后*Redis*会通过`queueClientForReprocessing`接口为客户端设置一个接触阻塞后的中间状态`CLIENT_UNBLOCKED`，并将这个客户端插入到服务器全局数据`redisServer.unblocked_clients`列表之中。
+
+为了及时处理这些客户端中的数据，*Redis*会在每次进入事件循环之前，通过`beforeSleep`函数，来调用下面这个接口来执行数据处理：
+```c
+void processUnblockedClients(void);
+```
+这个函数接口会遍历`redisServer.unblocked_clients`中的每一个客户端，移除客户端上的`CLIENT_UNBLOCKED`状态标记，同时检测如果客户端的缓冲区之中存在未处理的数据时，调用前面我们介绍过的`processInputBuffer`接口来处理数据。
+
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
