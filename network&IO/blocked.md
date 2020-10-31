@@ -82,6 +82,41 @@ struct blockingState {
 };
 ```
 
+
+而另外另外一种解除客户端阻塞状态的方式，就是客户端等待的键已经就绪，下面这个函数便是用于通知键就绪的接口：
+```c
+void signalKeyAsReady(redisDb *db, robj *key);
+```
+被客户端阻塞等待的键一定是一个已经不存在于数据库键空间之中的键，那么如果想要通知客户端键就绪的事件，就需要这个键被重新加入到数据库键空间中时，调用`signalKeyAsReady`接口进行通知：
+```c
+void dbAdd(redisDb *db, robj *key, robj * val)
+{
+    ...
+    if (val->type == OBJ_LIST ||
+        val->type == OBJ_ZSET)
+        signalKeyAsReady(db, key);
+    ...
+}
+```
+`signalKeyAsReady`这个接口会检查被加入的键是否存在于该数据库键空间的阻塞列表`redisDb.blocking_keys`之中，如果不存在则表明这个键没有被任何一个客户端“阻塞地”等待；反正会将这个就绪的键加入到服务器的就绪队列`redisServer.ready_keys`以及键空间的就绪队列`redisDb.ready_keys`之中，等待后续的处理。
+
+而*Redis*在收到一个键就绪的事件之后，需要解锁并通知阻塞在这个键上的客户端：
+```c
+void handleClientsBlockedOnKeys(void);
+```
+上面这个`handleClientsBlockedOnKeys`函数便是用于处理这种情况的接口，由于键的就绪事件都是由于某一个客户端执行命令所产生的，因此这个函数在*Redis*每次执行一条命令时，会调用`handleClientsBlockedOnKeys`这个接口来对阻塞的客户端进行处理：
+```c
+int processCommand(client *c)
+{
+    ...
+    call(c, CMD_CALL_FULL);
+    if (listLength(server.ready_keys))
+        handleClientsBlockedOnKeys();
+    ...
+}
+```
+上面这段代码，便是*Redis*调用`handleClientsBlockedOnKeys`函数的具体场景。
+
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
 
