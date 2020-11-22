@@ -1,4 +1,4 @@
-# Redis主从模式
+# Redis主从复制
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
