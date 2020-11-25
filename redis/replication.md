@@ -57,10 +57,97 @@
 
 ## 复制功能相关数据结构
 
+### 服务器全局变量中复制相关的数据结构
+*Redis*在`redisServer`这个数据结构之中，存储了一系列用于维护复制功能相关的字段。而服务器全局数据之中的数据字段可以被划分为*Master*实例与*Slave*实例所应用的数据。
+#### Master实例需要的数据
+在*Master*实例上所有连接在这个服务器上的*Slave*实例节点，被存储在一个双端链表之中：
+```c
+struct redisServer
+{
+    list *slaves;
+};
+```
+
+除此之外，*Master*实例上关于复制机制的相关数据可以被分为三个部分：
+1. *Master*实例自身数据的维护：
+    1. `redisServer.replid`，用于存储*Master*实例自身的复制ID。
+    1. `redisServer.master_repl_offset`，用于记录前面所提到的*Master*实例的复制偏移量。
+1. *Master*实例上积压缓冲区：
+    1. `redisServer.repl_backlog`，*Master*上的积压缓冲区，这个积压缓冲区是一段连续分配的内存。
+    1. `redisServer.repl_backlog_size`，积压缓冲区的长度
+    1. `redisServer.repl_backlog_histlen`
+    1. `redisServer.repl_backlog_idx`
+    1. `redisServer.repl_backlog_off`
+    1. `redisServer.repl_backlog_time_limit`
+1. *Master*实例上关于*Slave*的统计与配置数据:
+    1. `redisServer.slaveseldb`
+    1. `redisServer.repl_ping_slave_period`
+    1. `redisServer.repl_no_slaves_since`
+    1. `redisServer.repl_min_slaves_to_writw`
+    1. `redisServer.repl_min_slaves_max_lag`
+    1. `redisServer.repl_good_slaves_count`
+    1. `redisServer.repl_diskless_sync`
+    1. `redisServer.repl_diskless_sync_delay`
+#### Slave实例需要的数据
+在*Slave*实例上，*Redis*则是会一个单独的`client`对象来记录其对应的*Master*实例：
+```c
+struct redisServer
+{
+    client* master;
+    client* cached_master;
+}
+```
+另外还有一些数据字段用于维护*Slave*实例端的复制机制：
+1. `redisServer.repl_syncio_timeout`
+1. `redisServer.repl_state`
+1. `redisServer.repl_transfer_size`
+1. `redisServer.repl_transfer_read`
+1. `redisServer.repl_transfer_last_fsync_off`
+1. `redisServer.repl_transfer_s`
+1. `redisServer.repl_transfer_fd`
+1. `redisServer.repl_transfer_tmpfile`
+1. `redisServer.repl_transfer_lastio`
+1. `redisServer.repl_server_stale_data`
+1. `redisServer.repl_slave_ro`
+1. `redisServer.repl_slave_ignore_maxmemory`
+1. `redisServer.repl_down_since`
+1. `redisServer.repl_disable_tcp_nodelay`
+### 客户端对象中复制相关的数据结构
+因为在*Redis*的复制机制之中，*Master*实例与*Slave*实例彼此将对方看做一个特殊的客户端，因此在`client`这个表示客户端的数据结构之中也存储了一系列用于维护复制功能相关的数据字段。
+1. `client.replstate`
+1. `client.repl_put_online_on_ack`
+1. `client.repldbfd`
+1. `client.reoldboff`
+1. `client.repldbsize`
+1. `client.replpreamble`
+1. `client.read_reploff`
+1. `client.reploff`
+1. `client.repl_ack_off`
+1. `client.repl_ack_time`
+1. `client.psync_initial_offset`
+1. `client.replid`
+1. `client.slave_listening_port`
+1. `client.slave_ip`
+1. `client.slave_capa`
+1. `client.woff`
 ## 从Master角度看复制功能
+
+### 积压缓冲区的维护
+
+### 与Slave建立连接
+
+### 执行数据同步
+
+### 执行命令转发
+
 
 ## 从Slave角度看复制功能
 
+### 与Master建立连接
+
+### 执行数据同步
+
+### 接收命令转发
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
