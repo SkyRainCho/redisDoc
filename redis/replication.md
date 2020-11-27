@@ -35,7 +35,7 @@
 1. *Redis*使用正常的方式，启动一个后台子进程来生成**RDB**文件到磁盘上，等待磁盘上的*RDB*文件生成结束，在通过网络连接将这个**RDB**文件发送给*Slave*节点。
 2. 如果*Master*实例所在的服务器上的磁盘性能很低的话，那么先向磁盘中写入数据再从磁盘进行读取与网络传输的话，会导致数据同步的效率很低。对于这种情况，*Redis*设计了一种无盘的数据同步方式，也就是不通过磁盘文件，而是在生成**RDB**文件的过程之中，直接将数据写入与*Slave*实例所建立的连接的套接字文件描述符上，*Slave*实例直接通过网络来接收*Master*发来的同步数据，这样可以大大提升针对单一*Slave*实例同步的速度。而这得益于**Linux**操作系统中*一切皆文件*的设计理念以及*Redis*自身实现的`rio`通用IO对象数据结构。
 
-虽然采用无盘方式进行数据同步的策略，会提升单一*Slave*实例的同步效率，免去了磁盘IO所带来的延时，但是这种方式也有一个问题，便是在多个*Slave*需要数据同步的时候，无法复用**RDB**文件，哪怕两个*Slave*实例的同步请求相聚很短事件内到达*Master*实例，*Master*也不得不进行重复两次**RDB**的生成过程。那么采用有磁盘的方式来进行数据同步的话，如果在生成**RDB**文件的过程中，又有一个*Slave*实例期望与*Master*实例之间进行数据同步的话，那么我们可以在**RDB**文件生成结束之后，将这个文件发送给多个等待数据同步的*Slave*实例，免去了重复生成**RDB**文件所带来的系统负载。
+虽然采用无盘方式进行数据同步的策略，会提升单一*Slave*实例的同步效率，免去了磁盘IO所带来的延时，但是这种方式也有一个问题，便是在多个*Slave*需要数据同步的时候，无法复用**RDB**文件，一旦为一个*Slave*实例开启了无盘的**数据同步**，如果另外一个*Slave*实例也来请求**数据同步**的话，*Master*也不得不进行重复两次**RDB**的生成过程。那么采用有磁盘的方式来进行数据同步的话，如果在生成**RDB**文件的过程中，又有一个*Slave*实例期望与*Master*实例之间进行数据同步的话，那么我们可以在**RDB**文件生成结束之后，将这个文件发送给多个等待数据同步的*Slave*实例，免去了重复生成**RDB**文件所带来的系统负载。
 
 上面所介绍的**数据同步**方式，无论是有盘的还是无盘的，其本质都是对*Master*实例上的数据进行一次全量的备份，*Slave*实例将网络连接上接收到的同步数据写入一个本地文件之中，当传输接收之后通过`rdbLoad`接口使用这个全量的数据备份还原*Master*上的数据。通过后面我们将要介绍的**命令转发**，*Master*与*Slave*之间可以保持数据上的一致性。但是如果在日常的运行之中，*Master*与*Slave*之间的网络连接出现问题，被转发的命令无法传递到*Slave*实例上，这将导致二者数据的不一致，为了解决这个问题，当*Slave*与*Master*直接重新建立连接时，会重新执行一次**数据同步**以继续维持两者间数据的一致性。早期的*Redis*也确实使用这种方式在重连时进行全量的**数据同步**的，但是这其中也存在一个问题，
 
@@ -70,24 +70,24 @@ struct redisServer
 
 除此之外，*Master*实例上关于复制机制的相关数据可以被分为三个部分：
 1. *Master*实例自身数据的维护：
-    1. `redisServer.replid`，用于存储*Master*实例自身的复制ID。
-    1. `redisServer.master_repl_offset`，用于记录前面所提到的*Master*实例的复制偏移量。
+    1. `redisServer.replid`，用于存储*Master*实例自身的复制ID，这是一个40位的随机字符串，用于对不同的*Redis*实例进行区分。
+    1. `redisServer.master_repl_offset`，用于记录前面所提到的*Master*实例的复制偏移量。每次*Master*实例将命令写入到积压缓冲区之中的时候，会增加这个`master_repl_offset`复制偏移量。
+    1. `redisServer.slaveseldb`，用于记录上一次执行复制命令对应的键空间编号。
 1. *Master*实例上积压缓冲区：
-    1. `redisServer.repl_backlog`，*Master*上的积压缓冲区，这个积压缓冲区是一段连续分配的内存。
-    1. `redisServer.repl_backlog_size`，积压缓冲区的长度
-    1. `redisServer.repl_backlog_histlen`
-    1. `redisServer.repl_backlog_idx`
-    1. `redisServer.repl_backlog_off`
-    1. `redisServer.repl_backlog_time_limit`
+    1. `redisServer.repl_backlog`，*Master*上的积压缓冲区，这个积压缓冲区是一段固定的被连续分配的内存。这个积压缓冲区是循环复用的，当写入的数据已经达到积压缓冲区的尾部时，新的数据会从积压缓冲区头部开始写入，并覆盖积压缓冲区之中的旧数据。
+    1. `redisServer.repl_backlog_size`，积压缓冲区的长度。
+    1. `redisServer.repl_backlog_histlen`，这个用于记录积压缓冲区之中实际数据的长度，这个字段数值的长度不会超过`repl_backlog_size`。 
+    1. `redisServer.repl_backlog_idx`，用于标记循环积压缓冲区之中当前的数据偏移，如果有新的数据要被写入积压缓冲区的话，将会从`repl_backlog_idx`的下一个字节开始数据写入。
+    1. `redisServer.repl_backlog_off`，这个用于记录积压缓冲区中有效数据的第一个字节对应于`master_repl_offset`的偏移量。
 1. *Master*实例上关于*Slave*的统计与配置数据:
-    1. `redisServer.slaveseldb`
-    1. `redisServer.repl_ping_slave_period`
-    1. `redisServer.repl_no_slaves_since`
-    1. `redisServer.repl_min_slaves_to_writw`
-    1. `redisServer.repl_min_slaves_max_lag`
-    1. `redisServer.repl_good_slaves_count`
-    1. `redisServer.repl_diskless_sync`
-    1. `redisServer.repl_diskless_sync_delay`
+    1. `redisServer.repl_backlog_time_limit`，用于记录积压缓冲区的最大生存时间，如果*Master*实例长时间没有*Slave*实例连接，则会将积压缓冲区释放。
+    1. `redisServer.repl_ping_slave_period`，用于配置*Master*实例与*Slave*实例发送**PING**命令的时间间隔。
+    1. `redisServer.repl_no_slaves_since`，记录*Master*上开始没有*Slave*连接的开始时间。
+    1. `redisServer.repl_min_slaves_to_write`，配置*Master*实例上所需要的最小*Slave*实例数量
+    1. `redisServer.repl_min_slaves_max_lag`，
+    1. `redisServer.repl_good_slaves_count`，记录*Master*实例上，当前处于*good*状态的*Slave*实例数量。
+    1. `redisServer.repl_diskless_sync`，配置*Master*实例上，是否使用启用通过网络的无盘复制方式。
+    1. `redisServer.repl_diskless_sync_delay`，配置*Matser*实例上启动无盘复制的延时时间，如一个*Slave*节点请求了一次无盘复制，这是*Master*将会延时一段时间在开启**RDB**数据的传输，这样如果在这段延时时间内，另外一个*Slave*节点也来请求一次无盘的**数据同步**，*Master*可以仅开启一次生成**RDB**文件的处理逻辑。
 #### Slave实例需要的数据
 在*Slave*实例上，*Redis*则是会一个单独的`client`对象来记录其对应的*Master*实例：
 ```c
@@ -98,8 +98,24 @@ struct redisServer
 }
 ```
 另外还有一些数据字段用于维护*Slave*实例端的复制机制：
-1. `redisServer.repl_syncio_timeout`
-1. `redisServer.repl_state`
+1. `redisServer.repl_syncio_timeout`，在*Slave*实例一侧，在向*Master*实例发送内部命令时，是采用阻塞整个进程的同步IO方式进行传输的，`repl_syncio_timeout`这个字段用于设定每次同步IO的超时时间。
+1. `redisServer.repl_state`，用于记录在主从模式之中，当前*Slave*实例所处于的状态：
+    1. `REPL_STATE_NONE`
+    1. `REPL_STATE_CONNECT`，通过配置或者**REPLICAOF**命令设置了*Master*地址信息之后，*Slave*实例会被置为这个状态，这个状态表示*Slave*将要与*Master*实例建立连接。
+    1. `REPL_STATE_CONNECTING`，当*Slave*已经设置了地址信息之后，会通过`anetTcpNonBlockBestEffortBindConnect`函数接口建立与*Master*实例的连接，当连接建立并注册到事件循环之后，*Slave*节点将会被设置成`PEPL_STATE_CONNECTING`这个状态。
+    1. `REPL_STATE_RECEIVE_PONG`，由于连接是以非阻塞的方式建立的，因此第一次从事件循环之中返回时，表明连接已经被建立，此时*Slave*会向*Master*同步发送一条**PING**命令，并将状态设置为`REPL_STATE_RECEIVE_PONG`，以表明自己处于等待接受*Master*返回的状态。
+    1. `REPL_STATE_SEND_AUTH`，这个状态表示*Slave*实例将要将*Master*发送认证命令**AUTH**
+    1. `REPL_STATE_RECEIVE_AUTH`
+    1. `REPL_STATE_SEND_PORT`
+    1. `REPL_STATE_RECEIVE_PORT`
+    1. `REPL_STATE_SEND_IP`
+    1. `REPL_STATE_RECEIVE_IP`
+    1. `REPL_STATE_SEND_CAPA`
+    1. `REPL_STATE_RECEIVE_CAPA`
+    1. `REPL_STATE_SEND_PSYNC`
+    1. `REPL_STATE_RECEIVE_PSYNC`
+    1. `REPL_STATE_TRANSFER`
+    1. `REPL_STATE_CONNECTED`
 1. `redisServer.repl_transfer_size`
 1. `redisServer.repl_transfer_read`
 1. `redisServer.repl_transfer_last_fsync_off`
