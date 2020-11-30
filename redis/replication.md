@@ -211,6 +211,28 @@ void feedReplicationWithObject(robj *o);
 
 ## 从Slave角度看复制功能
 
+
+
+
+1. `listening-port`，用于设置*Slave*实例上对应`client.slave_listening_port`的字段信息，存储*Slave*实例监听的端口数据。
+1. `ip-address`，用于设置*Slave*实例上对应`client.slave_ip`的字段信息，存储*Slave*实例监听的IP数据。
+1. `capa`，用于设置*Slave*实例上对应`client.slave_capa`的字段信息，存储这个*Slave*实例支持的capa数据：
+    1. `SLAVE_CAPA_EOF`
+    1. `SLAVE_CAPA_PSYNC2`
+1. `ack`，*Slave*用于向*Master*实例发送**ACK**数据，用于通知当前已经处理的同步数据的数量，通知的数据会被记录到对应客户端`client.repl_ack_off`字段上，另外也会更新对应客户端`client.repl_ack_time`的时间戳。
+1. `getack`，上面`ack`是服务器内部使用的命令，由*Slave*实例自动发送；而这个`getack`则是在*Slave*实例一侧被执行的，显式地要求*Slave*实例向*Mater*实例发送一次**ACK**数据。
+
+
+
+**PSYNC**命令用于*Slave*实例在通过**REPLCONF**命令向*Master*实例设置了复制相关数据之后向*Master*请求数据同步，这个命令也是一条内部命令，由*Slave*实例一侧自动执行，该命令的格式为：
+
+    PSYNC <replid> <reploffset>
+
+这个命令之中：
+1. `<replid>`指定了*Matser*实例对应的复制ID，如果*Slave*发送的`<replid>`为`?`，则表示是第一次建立连接，需要进行一次全量的**数据同步**。
+1. `<reploffset>`指定了*Slave*自身的复制偏移，同于通知*Master*是否需要进行一次全量的**数据同步**
+
+
 ### 与Master建立连接
 
 ### 执行数据同步
