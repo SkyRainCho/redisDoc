@@ -200,20 +200,28 @@ void feedReplicationBacklog(void *ptr, size_t len);
 void feedReplicationWithObject(robj *o);
 ```
 
-这两个函数分别用于将一段内存数据写入积压缓冲区以及将一个对象数据结构`robj`写入解压缓冲区。
+这两个函数分别用于将一段内存数据写入积压缓冲区以及将一个对象数据结构`robj`写入解压缓冲区。由于*Redis*之中积压缓冲区是一个循环缓冲区，当缓冲区已经被写满，新的数据将会从积压缓冲区的起始位置重新进行写入。
 
 ### 与Slave建立连接
+在*Redis*之中，*Master*实例与*Slave*实例建立连接的过程，从*Master*实例一侧来看主要是**REPLCONF**命令以及**PSYNC**这两个命令的处理过程。
 
-### 执行数据同步
+#### REPLCONF命令的实现细节
 
-### 执行命令转发
+当一个*Slave*实例与*Master*建立连接之后，对于*Master*实例来说，这个*Slave*与一般的客户端没有任何的差异。在*Slave*实例与*Master*实例通过**PING**命令以及**PONG**返回确认了连接之后，*Slave*实例将会发起一系列的**REPLCONF**命令，*Master*实例收到**REPLCONF**命令后，会将相应的配置数据设置到代表这个*Slave*对应的客户端对象`client`的相应字段上。
 
+**REPLCONF**命令的格式为：
 
-## 从Slave角度看复制功能
+```
+REPLCONF <option> <value> <option> <value> ...
+```
 
+这个命令对应的实现函数为：
 
+```c
+void replconfCommand(client *c);
+```
 
-
+这个函数所接收的参数必须是双数，需要满足每一个`<option>`就需要对应的`<value>`。**REPLCONF**这个命令的实现函数比较简单，解析参数之中的`<option>`，并根据`<option>`的不同，将对应的`<value>`设置到`client`结构体的对应字段上。那么**REPLCONF**命令可以接受的`<option>`有：
 1. `listening-port`，用于设置*Slave*实例上对应`client.slave_listening_port`的字段信息，存储*Slave*实例监听的端口数据。
 1. `ip-address`，用于设置*Slave*实例上对应`client.slave_ip`的字段信息，存储*Slave*实例监听的IP数据。
 1. `capa`，用于设置*Slave*实例上对应`client.slave_capa`的字段信息，存储这个*Slave*实例支持的capa数据：
@@ -222,7 +230,7 @@ void feedReplicationWithObject(robj *o);
 1. `ack`，*Slave*用于向*Master*实例发送**ACK**数据，用于通知当前已经处理的同步数据的数量，通知的数据会被记录到对应客户端`client.repl_ack_off`字段上，另外也会更新对应客户端`client.repl_ack_time`的时间戳。
 1. `getack`，上面`ack`是服务器内部使用的命令，由*Slave*实例自动发送；而这个`getack`则是在*Slave*实例一侧被执行的，显式地要求*Slave*实例向*Mater*实例发送一次**ACK**数据。
 
-
+#### PSYNC命令的实现细节
 
 **PSYNC**命令用于*Slave*实例在通过**REPLCONF**命令向*Master*实例设置了复制相关数据之后向*Master*请求数据同步，这个命令也是一条内部命令，由*Slave*实例一侧自动执行，该命令的格式为：
 
@@ -232,6 +240,70 @@ void feedReplicationWithObject(robj *o);
 1. `<replid>`指定了*Matser*实例对应的复制ID，如果*Slave*发送的`<replid>`为`?`，则表示是第一次建立连接，需要进行一次全量的**数据同步**。
 1. `<reploffset>`指定了*Slave*自身的复制偏移，同于通知*Master*是否需要进行一次全量的**数据同步**
 
+**PSYNC**命令是通过下面这个`syncCommand`函数来实现的：
+
+```c
+void syncCommand(client *c);
+```
+
+我们可以来看一下这个函数的一些代码片段，借此窥探**PSYNC**在处理*Master*与*Slave*建立连接的一些细节：
+
+```c
+void syncCommand(client *c)
+{
+    if (c->flags & CLIENT_SLAVE) return;
+    if (server.masterhost && server.repl_state != REPL_STATE_CONNECTED)
+    {
+        ...
+        return;
+    }
+    
+    if (clientHasPendingReplies(c))
+    {
+        ...
+        return;
+    }
+    
+    //检查是否可以进行增量的数据同步
+    
+    c->replstate = SLAVE_STATE_WAIT_BGSAVE_START;
+    if (server.repl_disable_tcp_nodelay)
+        anetDisableTcpNoDelay(NULL, c->fd);
+    c->repldbfd = -1;
+    c->flags |= CLIENT_SLAVE;
+    listAddNodeTail(server.slaves, c);
+    if (listLength(server.slaves) == 1 && server.repl_backlog == NULL)
+    {
+        chanegReplicationId();
+        createReplicationBacklog();
+    }
+    
+    //处理全量同步的细节数据
+}
+```
+
+通过上面的代码片段，我们可以发现：
+
+1. 在*Master*开始处理**PSYNC**命令之前，*Slave*实例对应的客户端`client`与其他的客户端没有任何区别，并不具有`CLIENT_SLAVE`这个特殊的标记。
+2. 一个*Slave*实例也可以接收**PSYNC**命令，用于处理*Sub-Slave*的连接，但是只能在处于`REPL_STATE_CONNECTED`状态下才可以处理**PSYNC**命令。
+3. 如果*Slave*实例对应的客户端`client`之中，还有数据在输出缓存里没有被发送到网络上的话，暂时不能执行**PSYNC**命令。
+4. 只有在**PSYNC**命令执行之后，才会给*Slave*对应的`client`对象设置上`CLIENT_SLAVE`这个特殊的标记掩码，并且将这个客户端对象加入到`redisServer.slaves`这个服务器双端链表之中。
+5. 当第一个*Slave*实例加入到`redisServer.slaves`之中，并且没有分配积压缓冲区的话，会调用`createReplicationBacklog`接口来创建积压缓冲区。
+
+### 执行数据同步
+
+#### 全量数据同步
+
+
+
+#### 增量数据同步
+
+
+
+### 执行命令转发
+
+
+## 从Slave角度看复制功能
 
 ### 与Master建立连接
 
