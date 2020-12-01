@@ -363,6 +363,30 @@ int replicationSetupSlaveForFullResync(client *slave, long long offset);
 
 ##### 有盘的RDB文件数据同步
 
+对于有盘**RDB**文件的**数据同步**，*Redis*会启动一个后台子进程生成**RDB**文件并将这个文件存储到磁盘上，当文件生成结束后，在通过网络连接将这个文件之中的数据发送到对应的一个或者多个*Slave*实例上。`startBgsaveReplication`函数会通过前面我们在介绍**RDB**数据持久化时所介绍的`rdbSaveBackground`函数接口来异步生成**RDB**文件，在子进程结束的回调函数`backgroundSaveDoneHandlerDisk`中会调用`updateSlavesWaitingBgsave`来处等待**RDB**生成的那些*Slave*对象。
+
+```c
+void updateSlavesWaitingBgsave(int bgsaveerr, int type);
+```
+
+对于等待有盘**RDB**文件的*Slave*，会将其对应的客户端状态`client.replstate`从`SLAVE_STATE_WIAT_BGSAVE_END`的状态切换至`SLAVE_STATE_SEND_BULK`的状态，这个新状态表示对应的*Slave*客户端进入了传输同步数据的状态。同时为这个*Slave*在事件循环之中注册可写事件的处理函数`sendBulkToSlave`，这也就意味着基于有盘**RDB**文件的**数据同步**，数据的传输是在*Redis*的主线程之中进行的。
+
+```c
+void sendBulkToSlave(aeEventLoop *el, int fd, void *privdata, int mask);
+```
+
+`sendBulkToSlave`这个接口会在发送正式的同步数据之前，向*Slave*实例以下面的格式发送**RDB**文件的长度数据：
+
+```
+$<length>\r\n
+```
+
+通过这个消息，*Slave*实例可以在接收数据之前，获得整个待接收数据的大小。接下来`sendBulkToSlave`接口会调用调用`read`系统调用从**RDB**文件之中读取`PROTO_IOBUF_LEN`大小的数据，并调用`write`系统调用接口，将数据发送给*Slave*实例。当所有的数据都发送结束之后，*Redis*会将这个客户端的可写事件处理函数从事件循环之中移除，以结束数据的传输，最后调用`putSlaveOnline`接口完成**数据同步**的最后操作。
+
+```c
+void putSlaveOnline(client *slave);
+```
+
 ##### 无盘的RDB文件数据同步
 
 #### 增量数据同步
