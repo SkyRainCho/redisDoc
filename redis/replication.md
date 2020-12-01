@@ -291,17 +291,83 @@ void syncCommand(client *c)
 5. 当第一个*Slave*实例加入到`redisServer.slaves`之中，并且没有分配积压缓冲区的话，会调用`createReplicationBacklog`接口来创建积压缓冲区。
 
 ### 执行数据同步
+在前面介绍的**PSYNC**命令，仅介绍了一部分关于建立*Master*与*Slave*建立连接的过程，而**数据同步**的相关流程的一部分逻辑也是在**PSYNC**命令的对应函数接口之中实现的。接下来我们就来看一下**全量数据同步**与**增量数据同步**的相关内容。
 
 #### 全量数据同步
+我们继续来展示一段`syncCommand`接口的代码片段：
+```c
+void syncCommand(client *c)
+{
+    ...
+    //如果无法进行增量数据同步，那么后续会开始处理全量同步的逻辑
+    c->replstate = SLAVE_STATE_WAIT_BGSAVE_START;
+    ...
+    if (server.rdb_child_pid != -1 && server.rdb_child_type == RDB_CHILD_TYPE_DISK)
+    {
+        ...
+        listRewind(server.slaves, &li);
+        while((ln = listNext(&li)))
+        {
+            slave = ln->value;
+            if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_END) break;
+        }
 
+        if (ln && ((c->slave_capa & slave->slave_capa) == slave->slave_capa))
+        {
+            copyClientOutputBuffer(c, slave);
+            replicationSetupForFullResync(c, slave->psync_inirial_offset);
+        }
+    }
+    else if (server.rdb_child_pid != -1 && server.rdb_child_type == RDB_CHILD_TYPE_SOCKET)
+    {
 
+    }
+    else
+    {
+        if (server.repl_diskless_sync && (c->slave_capa & SLAVE_CAPA_EOF))
+        {
+        
+        }
+        else
+        {
+            if (server.aof_child_pid == -1)
+            {
+                startBgsaveForReplication(c->slave_capa);
+            }
+        }
+    }
+}
+```
+这里在我们可以总结出开启**数据同步**的逻辑与流程：
+1. 初始将*Slave*实例设置为`SLAVE_STATE_WAIT_BGSAVE_START`状态，表示当前*Slave*实例正在等待*Master*实例开始生成**RDB**文件。
+1. 如果*Master*当前有后台子进程在向磁盘上生成**RDB**文件，那么当前*Master*上所有的*Slave*，如果有*Slave*处于`SLAVE_STATE_WAIT_BGSAVE_END`的状态，这意味着这次**RDB**文件是另外一个*Slave*由于全量数据同步而请求的。对于这种情况，如果两个*Slave*的`client.slave_capa`相同，想么后面请求**数据同步**的*Slave*将会复用前面*Slave*所请求的这次**RDB**文件。
+1. 如果*Master*当前有后台子进程在通过Socket来生成**RDB**文件，那么说明有其他的*Slave*在进行无盘的**数据同步**，这种情况下不会在开启新的**数据同步**。
+1. 对于没有后台进程生成**RDB**文件的*Master*实例，检查服务器是否配置了`server.repl_diskless_sync`，如果服务器配置了无盘数据同步，同时*Slave*支持`SLAVE_CAPA_EOF`，那么*Master*会通过`replicationCron`接口在下一次心跳之中处理无盘的**数据同步**。
+1. 如果服务器没有开启无盘**数据同步**，或者*Slave*不支持`SLAVE_CAPA_EOF`，则会在没有后台子进程重写**AOF**的情况下，通过调用`startBgSaveForReplication`接口来开启同步。
+
+*Master*开启**数据同步**生成**RDB**文件的逻辑是通过`startBgsaveForReplication`这个函数接口来实现的：
+```c
+int startBgsaveForReplication(int mincapa);
+```
+这个函数会根据*Master*实例上`redisServer.repl_diskless_sync`的配置以及*Slave*实例对应客户端`client.slave_capa`的配置，选择进行有盘的**RDB**文件生成，或是通过网络采用无盘的*RDB*文件生成逻辑。
+
+同步流程开启之后，*Master*会通过下面这个函数通知*Slave*实例请求同步的结果：
+```c
+int replicationSetupSlaveForFullResync(client *slave, long long offset);
+```
+调用这个函数，会将*Slave*对应的客户端`client.replstate`字段设置为`SLAVE_STATE_WAIT_BGSAVE_END`状态，表示其正在等待**RDB**文件生辰结束，同时设置这个*Slave*对应客户顿`client.psync_initial_offset`初始复制偏移字段为系统当前的复制偏移量。最后向*Slave*发送一条返回信息，消息的格式为：
+
+    +FULLRESYNC <replid> <offset>
+
+这条返回信息告知*Slave*实例一侧，需要进行一次全量的**数据同步**，并且将当前*Master*的复制ID以及复制偏移量一并发送给*Slave*实例。
+
+##### 有盘的RDB文件数据同步
+
+##### 无盘的RDB文件数据同步
 
 #### 增量数据同步
 
-
-
 ### 执行命令转发
-
 
 ## 从Slave角度看复制功能
 
