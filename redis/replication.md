@@ -386,12 +386,98 @@ $<length>\r\n
 ```c
 void putSlaveOnline(client *slave);
 ```
+`putSlaveOnline`这个接口主要会执行三个逻辑的处理：
+1. **Slave状态的刷新**，将*Slave*对应的客户端状态`client.replstate`从`SLAVE_STATE_SEND_BULK`切换至在线状态`SLAVE_STATE_ONLINE`。
+1. **重写注册可写事件处理函数**，重新为*Slave*对应的客户端注册可写事件回调处理函数`sendReplyToClient`，用以将执行数据全量同步期间*Master*产生的新命令发送给客户端，以完成数据的同步。
+1. **刷新Good Slave数量**，调用`refreshGoodSlavesCount`函数接口，来执行数量刷新的逻辑。
 
 ##### 无盘的RDB文件数据同步
+前面我们在讲有盘的**数据同步**时介绍了，*Master*在传输正式的同步数据之前，会先将**RDB**文件的长度发送给*Slave*；但是对于无盘的**数据同步**，其本质上是相当于在**RDB**文件的生成过程之中就将数据发送给*Slave*，这意味着*Slave*无法提前获知文件的大小，因此需要一种机制，通知*Slave*传输何时结束。为了解决这个问题，*Redis*设计了这样一种方式，在发送正式的**RDB**文件之前，*Master*会向*Slave*发送一段如下面格式的数据：
+
+    $EOF:<40位的随机十六进制字符串>\r\n
+
+这条数据用于通知*Slave*实例，数据传输结束的标记，一旦*Slave*再次收到这段随机字符串，那么就以为意味着数据传输的结束。不过这种情况，需要*Slave*一侧能够支持以`SLAVE_CAPA_EOF`的方式来接收数据，对于不支持`SLAVE_CAPA_EOF`的*Slave*，只能使用有盘的**数据同步**。
+
+接下来，我们就详细介绍一下无盘**数据同步**的实现细节。
+
+在*Master*一端，与有盘**数据同步**类似，也是通过`startBgsaveReplication`接口来启动的，不过这里*Redis*为无盘**数据同步**定义了一个新的函数接口`rdbSaveToSlaveSockets`，从名字可以看出，这是一个通过Socket网络连接来生成存储**RDB**文件的过程。
+```c
+int rdbSaveToSlavesSockets(rdbSaveInfo *rsi)
+{
+    if (server.aof_child_pid != -1 || server.rdb_child_pid != -1)
+        return C_ERR;
+
+    listRewind(server.slaves, &li);
+    while ((ln = listNext(&li)))
+    {
+        client *slave = ln->value;
+        if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_START)
+        {
+            fds[numfds++] = slave->fd;
+            replicationSetupSlaveForFullResync(slave, getPsyncInitialOffset);
+            anetBlock(NULL, slave->fd);
+            anetSendTimeout(NULL, slave->fd, server.repl_timeout*1000);
+        }    
+    }
+
+    if ((childpid = fork()) == 0)
+    {
+        rio slave_sockets;
+        rioInitWithFdset(&slave_sockets, fds, numfds);
+        
+        rdbSaveRioWithEOFMark(&slave_sockets, NULL, rsi);
+        
+        rioFlush(&slave_sockets);
+
+        rioFreeFdset(&slave_sockets);
+        exitFromChild(0);
+    }
+    else
+    {
+
+    }
+}
+```
+这里从上面`rdbSaveToSlavesSockets`的代码片段，我们可以总结出这个无盘**数据同步**的一些细节：
+1. 首先无盘**数据同步**也是通过启动后台子进程来异步进行的。
+1. 在开启数据传输之前，遍历`redisServer.slaves`中所有的*Slave*，收集处于`SLAVE_STATE_WAIT_BGSAVE_START`状态的*Slave*，收集其对应网络连接的套接字文件描述符，并调用`replicationSetupSlaveForFullResync`，将其状态切换至`SLAVE_STATE_WAIT_BGSAVE_END`。
+1. 创建子进程，在子进程之中通过上面收集到的套接字文件描述符调用`rioInitWithFdset`来初始化一个通用IO对象`rio`，
+1. 最后子进程调用`rdbSaveRioWithEOFMark`这个接口，完成**RDB**文件数据的生成与传输。
+
+最后在子进程结束后，*Master*实例依然会通过调用`updateSlavesWaitingBgsave`，不过这里和有盘**数据同步**的一点差异在于，有盘**数据同步**会将*Slave*对应的客户端对象从`SLAVE_STATE_WAIT_BGSAVE_END`状态切换至`SLAVE_STATE_SEND_BULK`的状态，进入数据发送的阶段，然而对于无盘**数据同步**在生成**RDB**的过程之中，就已经将数据同步给了*Slave*，这样*Slave*实例在`SLAVE_STATE_WAIT_BGSAVE_END`状态结束之后，会调过`SLAVE_STATE_SEND_BULK`状态，直接进入`SLAVE_STATE_ONLINE`的状态。
 
 #### 增量数据同步
+*Master*实例会在**PSYNC**的命令处理函数`syncCommand`之中来判断*Slave*发来的**PSYNC**命令，是否可以进行一次增量的**数据同步**。
+```c
+int masterTryPartialResyncChronization(client *c);
+```
+上面这个函数，是*Master*判断处理增量**数据同步**的接口，如果可以进行增量同步，那么函数会返回`C_OK`；否则的话，函数返回`C_ERR`，后续则会进行全量数据的同步。`masterTryPartialResyncChronization`这函数的实现逻辑较为简单：
+1. 通过从客户端命令之中解析出**PSYNC**的参数`<replid>`以及`<reploffset>`，来判断这个*Slave*是否可以进行增量数据的同步：
+    1. *Slave*发送的`<replid>`要与*Master*的`replid`相同。
+    1. *Slave*通知的自己的复制偏移量`<reploffset>`要恰好落在*Master*的积压缓冲区内。
+1. 由于省去了全量数据同步的过程，因此直接将*Slave*的状态设置为在线的状态`SLAVE_STATE_ONLINE`。
+1. 向*Slave*发送一条返回消息，格式为`+CONTINUS\r\n`，用于通知客户端将要进行增量**数据同步**。
+1. 通过`addReplyReplicationBacklog`将积压缓冲区之中的数据发送给*Slave*。
+1. 最后通过`refreshGoodsSlaveCount`函数，来刷新*Slave*的计次。
+
 
 ### 执行命令转发
+*Master*实例向*Slave*实例转发命令的过程，与向**AOF**文件之中追加命令的逻辑类似：
+```c
+void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc, int flags)
+{
+    if (server.aof_state != AOF_OFF && flags & PROPAGATE_AOF)
+        feedAppendOnlyFile(cmd, dbid, argv, argc);
+    if (flags & PROPAGATE_PREL)
+        replicationFeedSlaves(server.slaves, dbid, argv, argc);
+}
+```
+通过上面的代码，可以看出*Master*实例向*Slave*实例转发命令的逻辑，与追加**AOF**文件是先后进行的。
+```c
+void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc);
+```
+这个函数会将命令数据写入到服务器的积压缓冲区内，同时遍历*Slave*实例的双端链表，将命令转发给所有没处于`SLAVE_STATE_WAIT_BGSAVE_STATR`状态的*Slave*。对于处于`SLAVE_STATE_ONLINE`状态的*Slave*，命令数据直接会被发送到对端的*Slave*实例上；对于那些处于`SLAVE_STATE_WAIT_BGSAVE_END`或者`SLAVE_STATE_SEND_BULK`状态的实例，命令数据将会被写入客户端输入缓冲区里，等待全量数据同步结束后，通过前面所讲的重新注册可写事件处理函数`sendReplyToClient`，将缓冲区内的命令数据输出给*Slave*实例。
+这里还有一点与追加**AOF**命令相似，如果命令对应的数据库键空间编号与服务器中缓存的上一次操作的键空间不一致，那么在*Master*会向积压缓冲区里补充一条**SELECT**命令的记录，同时将这个命令转发给*Slave*实例。
 
 ## 从Slave角度看复制功能
 
