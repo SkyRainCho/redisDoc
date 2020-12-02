@@ -483,6 +483,82 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc);
 
 ### 与Master建立连接
 
+*Slave*实例一端，可以通过**REPLICAOF**命令来建立与*Master*实例的连接，这个命令有两种形式：
+
+```
+REPLICAOF no one
+REPLICAOF <host> <port>
+```
+
+1. 第一种形式，用于取消实例的*Slave*状态，将其转换为一个*Master*的实例。
+2. 第二种形式，用于将一个实例设置为某一个给定*Master*的*Slave*实例。
+
+```c
+void replicaofCommand(client *c);
+```
+
+上面这个命令处理函数会解析客户端命令的参数，分别处理上面的两种解除主从复制以及建立主从复制的过程。
+
+解除主从复制，是通过下面这个`replicationUnsetMaster`函数进行的：
+
+```c
+void replicationUnsetMaster(void);
+```
+
+这个函数会清空服务器上记录的*Master*数据信息`redisServer.masterhost`，同时释放在*Slave*一侧代表*Master*实例的客户端对象`redisServer.master`。
+
+而建立主从复制则是通过`replicationSetMaster`这个函数开始的：
+
+```c
+void replicationSetMaster(char *ip, int port)
+{
+    int was_master = server.masterhost == NULL;
+    
+   	sdsfree(server.masterhost);
+    server.masterhost = sdsnew(ip);
+    server.masterport = port;
+    if (server.master)
+    {
+        freeClient(server.master);
+    }
+	...
+    server.repl_state = REPL_STATE_CONNECT;
+}
+```
+
+这个函数会设置服务器上记录的*Master*实例的地址信息`redisServer.masterhost`以及`redisServer.masterport`两个字段；如果这个服务器曾经是另外一个*Master*实例的*Slave*，那么释放掉这个旧的*Master*客户端，并将当前服务器的状态`redisServer.repl_state`设置为`REPL_STATE_CONNECT`。
+
+不过这里我们发现`replicationSetMaster`函数并没有建立于*Master*服务器的连接，只是为*Slave*设置了建立连接所需要的数据。而真正进行连接，建立主从复制的逻辑，是在*Redis*的专门处理复制机制的心跳函数中进行的：
+
+```c
+void replicationCron(void)
+{
+    ...
+    if (Server.repl_state == REPL_STATE_CONNECT)
+    {
+        connectWithMaster();
+    }
+    ...
+}
+```
+
+这里*Redis*会检测当前服务器是否处于`REPL_STATE_CONNECT`的状态，如果满足条件的话便会调用`connectWithMaster`来与*Master*建立连接的。
+
+```c
+int connectWithMaster(void)
+{
+    fd = anetTcpNonBlockBestEffortBindConnect(NULL, server.masterhost, server.masterport, NET_FIRST_BIND_ADDR);
+    aeCreateFileEvent(server.el,fd,AE_READABLE|AE_WRITABLE,syncWithMaster,NULL);
+    server.repl_transfer_lastio = server.unixtime;
+    server.repl_transfer_s = fd;
+    server.repl_state = REPL_STATE_CONNECTING;
+}
+```
+
+这里建立连接的过程是使用非阻塞`connect`的方式发起的，由于非阻塞`connect`会立即返回，而此时连接并未真正建立，因此需要监听这个连接套接字上的可读与可写事件，并注册事件处理函数`syncWithMaster`；同时将当前服务的状态`redisServer.repl_state`设置为`REPL_STATE_CONNECTING`状态。
+
+当异步的连接建立成功时，会触发事件处理回调函数`syncWithMaster`，这个函数会完成在前面
+
 ### 执行数据同步
 
 ### 接收命令转发
