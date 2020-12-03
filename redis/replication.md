@@ -557,11 +557,55 @@ int connectWithMaster(void)
 
 这里建立连接的过程是使用非阻塞`connect`的方式发起的，由于非阻塞`connect`会立即返回，而此时连接并未真正建立，因此需要监听这个连接套接字上的可读与可写事件，并注册事件处理函数`syncWithMaster`；同时将当前服务的状态`redisServer.repl_state`设置为`REPL_STATE_CONNECTING`状态。
 
-当异步的连接建立成功时，会触发事件处理回调函数`syncWithMaster`，这个函数会完成在前面
+当异步的连接建立成功时，会触发事件处理回调函数`syncWithMaster`，这个函数会完成在前面概述之中介绍的，内部发送**PING**命令检测连接的建立情况；执行内部**REPLCONF**命令将*Slave*的配置信息通知*Master*；最后根据自身的状态，向*Master*实例发送**PSYNC**命令，开启数据同步。
+
+最后，在数据同步结束之后，会通过`replicationCreateMasterClient`接口，使用主从复制网络连接的套接字`redisServer.repl_transfer_s`来创建一个表示*Master*实例的客户端对象`client`，将其存储在`redisServer.master`字段上。
+
+之所以建立连接的过程需要在`replicationCron`心跳函数之中进行，而不是执行**REPLICAOF**命令时立刻执行。这种方式有一个优点，一旦出现了*Slave*与*Maste*断开连接的情况，那么在`replicationCron`心跳函数之中，会检测连接状态并在断开连接的情况下，重启通过调用`connectWithMaster`来建立连接。
 
 ### 执行数据同步
+在服务器全局变量之中关于关于*Master*实例的数据，是存储在`redisServer.master`这个字段上的；但是同时我们发现存在有另外一个字段`redisServer.cached_master`，看似这个数据也是与主从复制相关的内容。其实这是*Redis*在主从复制功能之中的一个特殊机制，`redisServer.cached_master`会缓存上一次连接的*Master*实例对应的客户端对象，这个缓存的客户端对象主要用于支持*Slave*发起增量的数据同步。缓存*Master*对应的客户端有两种方式：
+1. 在主从模式中，当与*Master*实例的连接中断时，会通过`replicationCachedMaster`函数，将`redisServer.master`存储的对象转移至`redisServer.cached_master`上，并清空原有`redisServer.master`。
+1. 如果一个*Redis*从来没有作为别的*Redis*服务器的*Slave*，那么当它执行**REPLICAOF**命令复制某一个*Master*时，会调用`replicationCacheMasterUsingMyself`接口，将一个代码该*Redis*服务器自身的**伪**客户端缓存为`redisServer.cached_master`。
+
+当*Slave*与*Master*之间出现断线重连时，可以通过调用`replicationResurrectCachedMaster`函数，来重新之前缓存的*Master*客户端对象：
+```c
+void replicationResurrectCachedMaster(int newfd);
+```
+
+或者当我们确定不再需要被缓存的*Master*客户端对象时，我们可以通过`replicationDiscardCachedMaster`来彻底释放被缓存的客户端。
+
+我们知道*Slave*请求与*Master*进行数据同步时，会使用内部命令**PSYNC**，而这个命令的格式为：
+
+    PSYNC <replid> <reploffset>
+
+*Slave*实例发送**PSYNC**命令是通过`slaveTryPartialResynchronization`函数进行的，在这个函数之中会判断当前的*Redis*是否具有`redisServer.cached_master`，如果存在则从`redisServer.cached_master`对象中获取`<replid>`以及`<reploffset>`；否则将`<replid>`设置为`?`，将`<reploffset>`设置为`-1`。最后将`<replid>`以及`<reploffset>`作为**PSYNC**命令的参数，发送给*Master*。
+
+#### 增量数据同步
+*Slave*实例会在`slaveTryPartialResynchronization`函数中等待从*Master*的返回数据。从前面介绍*Master*一侧的**数据同步**我们可以知道，如果*Slave*的**PSYNC**请求恰好可以完成一次增量的同步，*Master*会向*Slave*发送一个`+CONTINUE\r\n`的返回数据，通知可以进行增量**数据同步**；然后会加积压缓冲区之中的数据发送给*Slave*。而在*Slave*这一端，当检测返回数据为`+CONTINUE`时，也就意味着与*Master*断线重连成功，此时可以复用之前缓存的*Master*客户端对象`redisServer.cached_master`。
+
+在*Master*积压缓冲区之中的增量同步数据，可以被认为是一系列的命令数据的集合，因此*Slave*在通过`replicationResurrectCachedMaster`重用`redisServer.cached_master`时，会为这个客户端注册可读事件的回调函数`readQueryFromClient`，后续*Slave*将以正常处理客户端命令的形式来处理*Master*积压缓冲区之中的增量同步数据。
+
+#### 全量数据同步
+如果*Slave*在`slaveTryPartialResynchronization`函数中获取到了*Master*发来的形如`+FULLRESYNC <replid> <reploffset>\r\n`的数据，则说明测试需要进行全量的数据同步，这时缓存的*Master*客户端将会被`replicationDiscardCachedMaster`函数释放。
+
+接下来*Redis*会创建一个临时的**RDB**文件，并注册可读事件的处理函数`readSyncBulkPayload`来接收来自*Master*的同步数据。
+```c
+void readSyncBulkPayload(aeEventLoop *el, int fd, void *privdata, int mask);
+```
+`readSyncBulkPayload`这个函数首先会从*Master*传输的数据之中解析出前序的附加信息：
+1. 对于使用无盘数据同步的形式，则需要从`$EOF:<40位随机十六进制结束分隔符>\r\n`中解析出标记传输结束的标记字符串。
+1. 对于使用有盘数据同步的形式，则需要从`$<length>\r\n`中解析出标记**RDB**总长度的数据信息。
+
+接下来便是从连接之中持续读取数据，并将数据写入磁盘中的临时**RDB**文件之中，并判断传输是否结束。
+
+当**RDB**文件传输结束时，*Slave*一侧会先清空键空间之中的全部数据，同时调用`rdbLoad`函数从**RDB**文件之中完成数据的加载，最后在调用`replicationCreateMasterClient`函数，从连接的套接字文件描述符之中，创建一个表示*Master*的客户端对象，最终完成整个数据的同步。
 
 ### 接收命令转发
+```c
+void replicationFeedSlavesFromMasterStream(list *slaves, char *buf, size_t buflen);
+```
+对于*Slave*一端来说，*Master*实例实际上是一个具有特殊标记的客户端对象。因此，*Master*在数据同步之后转发来的命令，在*Slave*一次可以按照正常处理客户端命令的逻辑来处理，这里对于处理细节不在详细介绍，可以回看前面关于*Redis*客户端以及*Redis*命令的相关内容。不过这里还有一点特殊的情况，就是对于层次结构的主从复制结构，*Slave*对象在接收到*Master*转发来的命令之后，还需要将其发送给自己的*Slave*，也就是*Sub-Slave*，而这个工作则是通过上面`replicationFeedSlavesFromMasterStream`这个接口完成的。
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
