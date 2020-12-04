@@ -72,11 +72,11 @@ struct redisServer
 1. *Master*实例自身数据的维护：
     1. `redisServer.replid`，用于存储*Master*实例自身的复制ID，这是一个40位的随机字符串，用于对不同的*Redis*实例进行区分。
     1. `redisServer.master_repl_offset`，用于记录前面所提到的*Master*实例的复制偏移量。每次*Master*实例将命令写入到积压缓冲区之中的时候，会增加这个`master_repl_offset`复制偏移量。
-    1. `redisServer.slaveseldb`，用于记录上一次执行复制命令对应的键空间编号。
+    1. `redisServer.slaveseldb`，用于记录上一次执行复制命令对应的键空间编号；可以对应理解`redisServer.aof_selected_db`这个字段的作用。
 1. *Master*实例上积压缓冲区：
     1. `redisServer.repl_backlog`，*Master*上的积压缓冲区，这个积压缓冲区是一段固定的被连续分配的内存。这个积压缓冲区是循环复用的，当写入的数据已经达到积压缓冲区的尾部时，新的数据会从积压缓冲区头部开始写入，并覆盖积压缓冲区之中的旧数据。
     1. `redisServer.repl_backlog_size`，积压缓冲区的长度。
-    1. `redisServer.repl_backlog_histlen`，这个用于记录积压缓冲区之中实际数据的长度，这个字段数值的长度不会超过`repl_backlog_size`。 
+    1. `redisServer.repl_backlog_histlen`，这个用于记录积压缓冲区之中实际数据的长度，这个字段数值的长度不会超过`repl_backlog_size`规定的上限。 
     1. `redisServer.repl_backlog_idx`，用于标记循环积压缓冲区之中当前的数据偏移，如果有新的数据要被写入积压缓冲区的话，将会从`repl_backlog_idx`的下一个字节开始数据写入。
     1. `redisServer.repl_backlog_off`，这个用于记录积压缓冲区中有效数据的第一个字节对应于`master_repl_offset`的偏移量。
 1. *Master*实例上关于*Slave*的统计与配置数据:
@@ -102,18 +102,18 @@ struct redisServer
 1. `redisServer.masterport`，在*Slave*一侧，记录*Master*对应的端口。
 1. `redisServer.repl_syncio_timeout`，在*Slave*实例一侧，在向*Master*实例发送内部命令时，是采用阻塞整个进程的同步IO方式进行传输的，`repl_syncio_timeout`这个字段用于设定每次同步IO的超时时间。
 1. `redisServer.repl_state`，用于记录在主从模式之中，当前*Slave*实例所处于的状态：
-    1. `REPL_STATE_NONE`
+    1. `REPL_STATE_NONE`，表示当前服务器没有处于或者发起准备建立*Slave*的状态。
     1. `REPL_STATE_CONNECT`，通过配置或者**REPLICAOF**命令设置了*Master*地址信息之后，*Slave*实例会被置为这个状态，这个状态表示*Slave*将要与*Master*实例建立连接。
     1. `REPL_STATE_CONNECTING`，当*Slave*已经设置了地址信息之后，会通过`anetTcpNonBlockBestEffortBindConnect`函数接口建立与*Master*实例的连接，当连接建立并注册到事件循环之后，*Slave*节点将会被设置成`PEPL_STATE_CONNECTING`这个状态。
     1. `REPL_STATE_RECEIVE_PONG`，由于连接是以非阻塞的方式建立的，因此第一次从事件循环之中返回时，表明连接已经被建立，此时*Slave*会向*Master*同步发送一条**PING**命令，并将状态设置为`REPL_STATE_RECEIVE_PONG`，以表明自己处于等待接受*Master*返回的状态。
     1. `REPL_STATE_SEND_AUTH`，这个状态表示*Slave*实例将要将*Master*发送认证命令**AUTH**。
     1. `REPL_STATE_RECEIVE_AUTH`，这个状态表示*Slave*实例已近发送送完**AUTH**命令，正在等待*Master*的返回。
     1. `REPL_STATE_SEND_PORT`，表示*Slave*实例将要向*Master*实例通过**REPLCONF**发送自己的端口数据。
-    1. `REPL_STATE_RECEIVE_PORT`
+    1. `REPL_STATE_RECEIVE_PORT`，这个状态表示*Slave*已经通过**REPLCONF**命令向*Master*告知了自己的端口数据，正在等待*Master*的返回。
     1. `REPL_STATE_SEND_IP`，表示*Slave*实例将要向*Master*实例通过**REPLCONF**发送自己的端口数据。
-    1. `REPL_STATE_RECEIVE_IP`
-    1. `REPL_STATE_SEND_CAPA`，表示*Slave*实例将要向*Master*实例通过**REPLCONF**发送自己的端口数据。
-    1. `REPL_STATE_RECEIVE_CAPA`
+    1. `REPL_STATE_RECEIVE_IP`，这个状态表示*Slave*已经通过**REPLCONF**命令向*Master*告知了自己的IP数据，正在等待*Master*的返回。
+    1. `REPL_STATE_SEND_CAPA`，表示*Slave*实例将要向*Master*实例通过**REPLCONF**发送自己的CAPA信息。
+    1. `REPL_STATE_RECEIVE_CAPA`，这个状态表示*Slave*已经通过**REPLCONF**命令向*Master*告知了自己的CAPA信息。正在等待*Master*的返回。
     1. `REPL_STATE_SEND_PSYNC`，表示*Slave*实例将要向*Master*实例发送**PSYNC**命令以开启通过过程。
     1. `REPL_STATE_RECEIVE_PSYNC`，*Slave*发送完**PSYNC**命令后，等待*Master*实例的返回。
     1. `REPL_STATE_TRANSFER`，**数据同步**逻辑开始执行，*Slave*实例处于该状态从连接上获取*Master*发送到的同步数据。
@@ -122,14 +122,9 @@ struct redisServer
 1. `redisServer.repl_transfer_read`，用于记录*Slave*实例从网络连接上已经接收到的数据的数量。
 1. `redisServer.repl_transfer_last_fsync_off`，由于*Slave*实例收到的同步数据需要先写入磁盘，因此这个字段用于记录上次被写入到磁盘中的数据的偏移。
 1. `redisServer.repl_transfer_s`，用于记录*Slave*与*Master*之间连接的套接字文件描述符。
-1. `redisServer.repl_transfer_fd`，用于记录*Slave*实例介绍同步数据的临时**RDB**文件的文件描述符。
+1. `redisServer.repl_transfer_fd`，用于记录*Slave*实例接收同步数据的临时**RDB**文件的文件描述符。
 1. `redisServer.repl_transfer_tmpfile`，记录临时**RDB**文件的文件名。
 1. `redisServer.repl_transfer_lastio`，记录*Slave*实例上一次接收同步数据的时间戳。
-1. `redisServer.repl_server_stale_data`
-1. `redisServer.repl_slave_ro`
-1. `redisServer.repl_slave_ignore_maxmemory`
-1. `redisServer.repl_down_since`
-1. `redisServer.repl_disable_tcp_nodelay`
 ### 客户端对象中复制相关的数据结构
 因为在*Redis*的复制机制之中，*Master*实例与*Slave*实例彼此将对方看做一个特殊的客户端，因此在`client`这个表示客户端的数据结构之中也存储了一系列用于维护复制功能相关的数据字段。
 1. `client.replstate`，这个字段用于从*Master*的视角来看*Slave*对应客户端的状态：
@@ -137,21 +132,17 @@ struct redisServer
     1. `SLAVE_STATE_WAIT_BGSAVE_END`，对应*Slave*同步请求的**RDB**文件生成流程已经开始执行，正在等待**RDB**文件生成结束。
     1. `SLAVE_STATE_SEND_BULK`，*Master*正在想这个`client`对应*Slave*实例发送**RDB**同步数据。
     1. `SLAVE_STATE_ONLINE`，*Master*已经向这个`client`对应的*Slave*实例完成发送**RDB**文件，开始进入命令转发的流程。
-1. `client.repl_put_online_on_ack`
 1. `client.repldbfd`，*Master*用于同步的**RDB**文件的文件描述符。
 1. `client.reoldboff`，*Master*已经传输的**RDB**文件的大小。
-1. `client.repldbsize`，**Master**传输的**RDB**文件的总大小。
-1. `client.replpreamble`，用于记录*Master*传输的**RDB**文件的一些前缀信息。
-1. `client.read_reploff`
+1. `client.repldbsize`，*Master*传输的**RDB**文件的总大小。
+1. `client.replpreamble`，用于记录*Master*传输的**RDB**文件的一些前缀信息。对于有盘**RDB**传输，前缀信息中存储了**RDB**文件的长度；对于无盘**RDB**传输，前缀信息中存储了用于标记传输结束的`<EOF>`分隔字符串。
 1. `client.reploff`，在*Slave*上记录对应*Master*所发送的数据中已经被处理的数据偏移。
-1. `client.repl_ack_off`
-1. `client.repl_ack_time`
 1. `client.psync_initial_offset`，在*Master*实例一段用于记录对应*Slave*的初始偏移。
 1. `client.replid`，在*Slave*实例上记录*Master*实例的复制ID。
 1. `client.slave_listening_port`，在*Master*实例上记录的*Slave*通过**REPLCONF**命令传来的端口数据。
 1. `client.slave_ip`，在*Master*实例上记录的*Slave*通过**REPLCONF**命令传来的IP数据。
 1. `client.slave_capa`，在*Master*实例上记录的*Slave*通过**REPLCONF**命令传来的capa数据。
-1. `client.woff`
+
 ## 从Master角度看复制功能
 
 ### 积压缓冲区的维护
