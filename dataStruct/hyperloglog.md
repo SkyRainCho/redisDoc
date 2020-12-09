@@ -45,6 +45,30 @@
 1. 每个**HyperLogLog**寄存器中，存储配分配到这个寄存器的元素哈希值对应的`f(h)`的最大值。
 1. 通过收集16384个寄存器中存储的数据，通过某种计算方法，就可以获得了数据集的基数统计结果。
 
+至于在步骤2中是使用什么样的哈希算法，步骤4中为什么要计算第一次出现1的位置，以及步骤6中最终结果是如何计算出来的，大家可以自行搜索HyperLogLog算法相关的内容。
+
+*Redis*为了描述这个**HyperLogLog**对象定义了一个对应的数据结构：
+
+```c
+struct hllhdr {
+	char magic[4];
+    uint8_t encoding;
+    uint8_t notused[3];
+    uint8_t card[8];
+    uint8_t registers[];
+};
+```
+
+在这个数据结构之中：
+
+1. `hllhdr.magic`，用于存储字符串`HYLL`标记这是**HyperLogLog**对象。
+2. `hllhdr.encoding`，记录**HyperLogLog**对象的编码类型：
+   1. `HLL_DENSE`，表示这是一个**稠密**的**HyperLogLog**对象，拥有较多的数据元素，大部分的寄存器之中都拥有数据。
+   2. `HLL_SPARSE`，表示这是一个**稀疏**的**HyperLogLog**对象，拥有较少的数据元素，大部分的寄存器之中都是0，没有存储数据。
+3. `hllhdr.notused`，这三个字节的数据被预留暂时没有被使用，需要被设置为0。
+4. `hllhdr.card`，用于缓存**HyperLogLog**对象基数统计的结果，在向**HyperLogLog**对象中插入元素时，如果新的数据元素导致某个寄存器被更新，那么这个缓存结果将会失效，当**PFCOUNT**铭记获取统计结果时，会从通过遍历所有的寄存器来重新计算统计结果；否则会继续使用这个字段存储的统计结果。
+5. `hllhdr.registers`，**HyperLogLog**中被分配的12KB大小的16384个寄存器。
+
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
 
