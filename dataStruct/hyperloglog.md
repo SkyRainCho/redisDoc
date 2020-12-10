@@ -37,6 +37,7 @@
 
 ## Redis中基数统计的实现细节
 
+### Redis进行基数统计的流程
 *Redis*没有为**HyperLogLog**对象单独实现一个数据结构，而是使用一段连续分配的内存来存储**HyperLogLog**的相关数据。同时将这段连续的内存用字符串对象类型进行包装存储在数据库的键空间之中。*Redis*实现基数统计的逻辑为：
 1. 对于每一个**HyperLogLog**，*Redis*为其分配16384个寄存器，每个寄存器具有6比特大小。
 1. 对于待统计数据集中的每个数据元素，通过哈希函数计算出64位的数据元素哈希值。
@@ -47,6 +48,8 @@
 
 至于在步骤2中是使用什么样的哈希算法，步骤4中为什么要计算第一次出现1的位置，以及步骤6中最终结果是如何计算出来的，大家可以自行搜索HyperLogLog算法相关的内容。
 
+
+### Redis中HyperLogLog数据结构体的定义
 *Redis*为了描述这个**HyperLogLog**对象定义了一个对应的数据结构：
 
 ```c
@@ -68,6 +71,105 @@ struct hllhdr {
 3. `hllhdr.notused`，这三个字节的数据被预留暂时没有被使用，需要被设置为0。
 4. `hllhdr.card`，用于缓存**HyperLogLog**对象基数统计的结果，在向**HyperLogLog**对象中插入元素时，如果新的数据元素导致某个寄存器被更新，那么这个缓存结果将会失效，当**PFCOUNT**铭记获取统计结果时，会从通过遍历所有的寄存器来重新计算统计结果；否则会继续使用这个字段存储的统计结果。
 5. `hllhdr.registers`，**HyperLogLog**中被分配的12KB大小的16384个寄存器。
+
+### Redis中HyperLogLog的代码实现
+```c
+uint64_t MurmurHash64A(const void * key, int len, unsigned int seed);
+```
+上面这个`MurmurHash64A`函数用于计算一段数据的哈希值，会返回一个64比特的哈希值。用于处理前面基数统计流程中步骤2中计算数据元素的64位哈希值。
+
+```c
+int hllPatLen(unsigned char *ele, size_t elesize, long *regp);
+```
+这个`hllPatLen`函数，用于将一个数据元素加入**HyperLogLog**之中，会调用`MurmurHash64A`来计算数据元素64位哈希值，通过`regp`这个参数会返回数据元素究竟落在哪个**HyperLogLog**寄存器之中；而函数的返回值前面基数统计流程中步骤4中，哈希值中从最低位开始第一次出现1的位置`f(h)`。
+
+接下来，我们以**稠密**的**HyperLogLog**为例，讲述一下后续的代码内容。
+由于程序中，内存的分配以及访问都是按照字节来进行的，也就是以8比特为单位的，但是**HyperLogLog**中的每个寄存器都是6比特大小的，有的寄存器是落在一个字节内的，有的寄存器则是跨越两个字节的。因此*Redis*定义了两个宏，分别用于从指定的寄存器之中获取存储的值，以及向指定的寄存器之中存储数据：
+```c
+#define HLL_DENSE_GET_REGISTER(target, p, regnum)
+#define HLL_DENSE_SET_REGISTER(p, regnum, val)
+```
+
+当有一个新的元素被加入到**HyperLogLog**时，在通过`hllPatLen`计算出数据元素应该落在哪个寄存器之中以及对应哈希值`h`的`f(h)`之后，需要判断这个`f(h)`是否可以被更新到寄存器之中。
+```c
+int hllDenseSet(uint8_t *registers, long index, uint8_t count)
+{
+    uint8_t oldcount;
+    HLL_DENSE_GET_REGISTER(oldcount, registers, index);
+    if (count > oldcount)
+    {
+        HLL_DENSE_SET_REGISTER(registers, index, count);
+        return 1;
+    }
+    else
+    {
+        return 0;
+    }
+}
+```
+
+而**HyperLogLog**的插入接口便是通过上面`hllPatLen`以及`hllDenseSet`这两个函数来实现的:
+```c
+int hllDenseAdd(uint8_t *register, unsigned char *ele, size_t elesize)
+{
+    long index;
+    uint8_t count = hllPatLen(ele,elesize,&index);
+    return hllDenseSet(registers, index, count);
+}
+```
+
+那么当向**HyperLogLog**对象之中插入一定量的数据元素之后，我我们便可以获取基于当前已插入数据的基数统计结果。首先我们来看一下用于计算统计结果的一个辅助函数，收集16384个寄存器中存储数据的频数：
+```c
+void hllDenseRegHisto(uint8_t *registers, int* reghisto)
+{
+    int j;
+    for (j = 0; j < HLL_REGISTERS; j++>)
+    {
+        unsigned long reg;
+        HLL_DENSE_GET_REGISTER(reg, register, j);
+        reghisto[reg]++;
+    }
+}
+```
+通过上面收集的寄存器数据频数，通过计算便可以获得基数统计的结果：
+```c
+uint64_t hllCount(struct hllhdr *hdr, int *invalid)
+{
+    double m = HLL_REGISTERS;
+    double E;
+    int j;
+    int reghisto[64] = {0};
+
+    hllDenseRegHisto(hdr->registers, reghisto);
+
+    double z = m * hllTau((m-reghisto[HLL_Q+1])/(double)m);
+    for (j = HLL_Q; j >= 1; --j)
+    {
+        z += reghisto[j];
+        z *= 0.5;
+    }
+    z += m * hllSigma(reghisto[0]/(double)m);
+    E = llroundl(HLL_ALPHA_INF*m*m.z);
+    return (uint64_t) E;
+}
+```
+
+最后我们看一下合并两个**HyperLogLog**对象的逻辑，假设我们有一个**HyperLogLog**对象`hf1`，其寄存器之中的数据为`[a1, a2, ..., a16384]`，同时有另外一个对象`hf2`，其寄存器之中的数据为`[b1, b2, ..., b16384]`，那么合并后的新的**HyperLogLog**对象，它的寄存器中的内容将以如下形式来表示`[max(a1,b1), max(a2, b2), ..., max(a16384, b16384)]`。通过计算这个新的**HyperLogLog**对象的基数统计结果，便是`hf1`以及`hf2`这两对象对代表的数据集的交集之后的基数统计结果。相关的代码为：
+```c
+int hllMerge(uint8_t *max, robj *hll)
+{
+    struct hllhdr *hdr = hll->ptr;
+    int i;
+    uint8_t val;
+    for (i = 0; i < HLL_REGISTERS; i++)
+    {
+        HLL_DENSE_GET_REGISTER(val, hdr->registers, i);
+        if (val > max[i]) max[i] = val;
+    }
+}
+```
+
+以上便是*Redis*中**HyperLogLog**内容的一个简要介绍，当数据很少时，*Redis*会采用稀疏的数据结构，出于节约内容的考虑，此时不会足量地分配16384个寄存器，而是会对寄存器进行一个压缩，不过这里的实现细节较为复杂，但是其本质上有稠密的数据结构是一致的，因此处于通俗易懂的考虑，本只对稠密数据结构进行了介绍，如果有兴趣的同学可以自行查阅*Redis*源代码，了解实现细节。
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
