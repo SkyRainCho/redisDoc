@@ -272,11 +272,26 @@ int raxGenericInsert(rax *rax, unsigned char *s, size_t len, void *data, void **
 
 ![简单的基数树插入过程](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/%E7%AE%80%E5%8D%95%E7%9A%84%E5%9F%BA%E6%95%B0%E6%A0%91%E6%8F%92%E5%85%A5%E8%BF%87%E7%A8%8B.JPG)
 
-如果`raxLowWalk`函数返回的最大匹配前缀恰好落在了一个压缩节点的中间，那么我们需要对这个压缩节点先进行拆分，才能继续进行插入过程。为了描述拆分压缩节点的各种情况，我们先假设一个基数树的局部，在这个基数树中存在一个`[XXX]ANNIBALE`的*Key*，其中`ANNIBALE`存储在一个压缩节点`a`之中；另外存在一个`[XXX]ANNIBALESCO`的*Key*，而`SCO`存储在另外一个压缩节点`b`之中，这个基数树可以用下面的视图所表示：
+上面这种插入情况是整个插入逻辑之中一个较为简单的情况，接下来我们来看看最为复杂的插入情况。如果`raxLowWalk`函数返回的最大匹配前缀恰好落在了一个压缩节点的中间，也就是传出的`splitpos`结果不为0的情况，那么我们需要对这个压缩节点先进行拆分，才能继续进行插入过程。为了描述拆分压缩节点的各种情况，我们先假设一个基数树的局部，在这个基数树中存在一个`[XXX]ANNIBALE`的*Key*，其中`ANNIBALE`存储在一个压缩节点`a`之中；另外存在一个`[XXX]ANNIBALESCO`的*Key*，而`SCO`存储在另外一个压缩节点`b`之中，这个基数树可以用下面的视图所表示：
 
 ![基数树的局部]()
 
 现在我们可以将压缩节点的插入过程划分成5种情况来看待：
+
+1. 如果我们向这个局部的基数树之中插入一个字符串内容为`ANNIENTARE`的*Key*。对于这种情况，相当于`i != len && splitpos != 0`，即`raxLowWalk`的匹配前缀长度于字符串长度`len`不相等，同时匹配终止在**压缩节点**之中的位置`splitpos`不为0。![基数树压缩节点插入情况1]()
+2. 向这个局部的基数树之中插入一个字符串内容为`ANNIBALI`的*Key*。这种上情况与上述的情况有一些类似，区别在于情况1中，排除`ANNI`这个公共前缀以及转移的字符`E`以后，剩下的`NTARE`可以构成一个**压缩节点**；而这种情况里排除公共前缀以及转移字符之后，没有多余的字符，这里将会插入一个**普通节点**。![基数树压缩节点插入情况2]()
+3. 向这个局部的基数树之中插入一个字符串内容为`AGO`的*Key*。这种情况相当于`i != len && i == 1 && splitpos != 0`。这种情况与上面的情况1类似，但是情况1中匹配的终止节点依然保留为**压缩节点**；而这种情况里，匹配的终止节点会从**压缩节点**转化为**普通节点**。![基数树压缩节点插入情况3]()
+4. 向这个局部的基数树之中插入一个字符串内容为`CIAO`的*Key*。这种情况可以理解为`i == 0 && splitpos == 0`，即待插入的*Key*完全不匹配终止节点中的字符串，这意味着需要这次插入不但需要修改终止节点，包括终止节点的父节点也需要被修改。![基数树压缩节点插入情况4]()
+5. 向这个局部的基数树之中插入一个字符串内容为`ANNI`的*Key*。这种情况可以理解为`i == len && splitpos != 0`，即待插入的字符串`ANNI`在基数树之中可以完全匹配，但是匹配终止落在**压缩节点**的中间。![基数树压缩节点插入情况5]()
+
+通过上面这个`raxGenericInsert`这个函数，*Redis*实现了两个对外的插入接口：
+
+```c
+int raxInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old);
+int raxTryInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old);
+```
+
+`raxInsert`会向基数树之中插入一对*Key-Value*，如果*Key*以及存在于基数树之中的话，旧的*Value*会被更新；而`raxTryInsert`函数，在*Key*存在是，则不会执行后续的更新插入过程。
 
 ### 基数树的删除操作
 
@@ -284,13 +299,6 @@ int raxGenericInsert(rax *rax, unsigned char *s, size_t len, void *data, void **
 int raxRemove(rax *rax, unsigned char *s, size_t len, void **old);
 ```
 这个函数的作用是从给定的基数树`rax`中删除由`s`和`len`所指定的*key*，如果*key*被找到并且被删除，那么函数返回1，否则函数会返回0。当*key*被找到并被删除，同时`old`参数没有传`NULL`，那么这个*key*对应的*value*会通过`old`参数返回给调用者。
-
-
-```c
-void raxRecursiveFree(rax *rax, raxNode *n, void (*free_callback)(void *));
-void raxFreeWithCallback(rax *rax, void (*free_callback)(void *));
-void raxFree(rax *rax);
-```
 
 ## 基数树的迭代器遍历
 
@@ -315,45 +323,84 @@ typedef struct raxIterator {
 
 在这个迭代器数据结构之中：
 
-1. `raxIterator.flags`
-2. `raxIterator.rt`
-3. `raxIterator.key`
-4. `raxIterator.data`
-5. `raxIterator.key_len`
-6. `raxIterator.key_max`
-7. `raxIterator.key_static_string`
-8. `raxIterator.node`
-9. `raxIterator.stack`
-10. `raxItertor.node_cb`
+1. `raxIterator.flags`，表示这个迭代器的标记，用来标记迭代器当前所处于的状态：
+   1. `RAX_ITER_JUST_SEEKED`，表示当前迭代器刚刚完成`raxSeek`定位，在第一次遍历返回当前元素时，会清理掉这个状态。
+   2. `RAX_ITER_EOF`，表示迭代器已经完成迭代。
+   3. `RAX_ITER_SAFE`，表示这是一个安全迭代器，可以在遍历的过程中执行一些操作，但是速度会更慢一些。
+2. `raxIterator.rt`，这是一个基数树指针，记录当前迭代器关联的基数树。
+3. `raxIterator.key`，用于存储迭代器当前遍历到的*Key*的字符串。
+4. `raxIterator.data`，存储当前迭代器遍历到的*Key*对应的*Value*。
+5. `raxIterator.key_len`，记录当前*Key*的长度。
+6. `raxIterator.key_max`，记录当前可以容纳的*Key*字符串的最大长度。
+7. `raxIterator.key_static_string`，这是一个静态数组，初始使用这个数组来存储*Key*的字符串，只有当字符串长度超过`RAX_ITER_STATIC_LEN`的时候，才会使用动态分配的内存来存储*Key*的字符串。
+8. `raxIterator.node`，在非安全遍历下，记录迭代器当前遍历的基数树节点。
+9. `raxIterator.stack`，在非安全遍历下，记录从根节点到当前节点的遍历路径。
+10. `raxItertor.node_cb`，遍历节点的回调函数，通常被设置为`NULL`。
 
 ### 迭代器基础操作
-
-*Redis*会使用下面`raxStart`以及`raxStop`这两个函数来初始化一个
 
 ```c
 void raxStart(raxIterator *it, rax *rt);
 void raxStop(raxIterator *it);
+void raxEOF(raxIterator *it);
 ```
 
+上述三个基数树迭代器的基础操作中：
+
+1. `raxStart`，用于将迭代器与一个基数树进行关联。
+2. `raxStop`，当不在需要迭代器时，这个函数会释放`raxIterator.key`被动态分配的内存，以及释放`raxIterator.stack`这个栈结构。
+3. `raxEOF`，通过`raxIterator.flags`标记中是否存在`RAX_ITER_EOF`来判断迭代是否已经结束。
+
+不过这里需要注意的是，`raxStart`初始化后的迭代器不可以立即进行迭代遍历，因为初始的迭代器便携带`RAX_ITER_EOF`标记。如果对这个迭代器进行迭代，那么迭代会立即结束。通过`raxStart`初始化后的迭代器只有在**SEEK**操作之后，才可以进行常规意义上的迭代遍历操作。
+
 ```c
-int raxIteratorNextStep(raxIterator *it, int noup);
-int raxSeekGreatest(raxIterator *it);
-int raxIteratorPrevStep(raxIterator *it, int noup);
+int raxIteratorAddChars(raxIterator *it, unsigned char *s, size_t len);
+void raxIteratorDelChars(raxIterator *it, size_t count);
 ```
+
+上面这两个函数用于操作存储在`raxIterator.key`字段之中*Key*对应的字符串：
+
+1. `raxIteratorAddChars`，用于将一个长度为`len`的子字符串`s`追加到`raxIterator.key`之中，这里如果`raxIterator.key`中字符串的长度没有超过`RAX_ITER_STATIC_LEN`，那么会使用`raxIterator.key_static_string`这个静态数组进行存储，否则便会为字符串动态分配内存。
+2. `raxIteratorDelChars`，这个函数用于从迭代器*Key*字符串`raxIterator.key`的最右侧开始移除`count`个字符。
+
+*Redis*基数树中的*Key*都是字符串，因此*Redis*提供了一个字符串与*Key*进行比较的函数：
+
+```c
+int raxCompare(raxIterator *iter, const char *op, unsigned char *key, size_t key_len)
+```
+
+这个函数可以比较一个迭代器所代表的*Key*的内容`raxIterator.key`与一个长度为`key_len`的字符串`key`进行比较。如果比较结果为真，则函数返回1；否则返回0。通过参数`op`可以给出比较的类型，可用的比较类型包括`==`，`>=`，`>`，`<=`，`<`这五种比较方式。
 
 ### 迭代器定位操作
 
-```c
-int raxSeek(raxIterator *it, const char *op, unsigned char *ele, size_t len);
-int raxNext(raxIterator *it);
-int raxPrev(raxIterator *it);
-int raxRandomWalk(raxIterator *it, size_t steps);
-int raxCompare(raxIterator *iter, const char *op, unsigned char *key, size_t key_len);
-int raxEOF(raxIterator *it);
+由于在*Redis*的基数树中，*Key*是按照字典的升序顺序进行排列的，那么下面`raxSeekGreatest`这个函数便是用于将一个给定的迭代器定位到其所关联的基数树中的最大的那个*Key*所对应的节点。
 
+```c
+int raxSeekGreatest(raxIterator *it);
 ```
 
-### 迭代器操作流程
+在了解完上面`raxSeekGreatest`这个特殊的定位函数之后，我们来看一下*Redis*为基数树迭代器实现的一个通用的定位接口：
+
+```c
+int raxSeek(raxIterator *it, const char *op, unsigned char *ele, size_t len);
+```
+
+这个函数可以根据比较类型`op`来为迭代器在基数树中定位不用的元素，例如下面这段代码：
+
+```c
+raxSeek(&iter,">=",(unsigned char*)"foo",3);
+```
+
+会将迭代器重新定位到基数树中第一个大于等于`foo`的*Key*，这里面的操作类型`op`除了可以是`raxCompare`函数中的`==`，`>=`，`>`，`<=`，`<`这五种比较操作类型之外，还可以是`^`以及`$`分别用于定位基数树中最小的以及最大的*Key*。
+
+### 迭代器遍历操作
+
+```c
+int raxNext(raxIterator *it);
+int raxPrev(raxIterator *it);
+```
+
+当我们通过`raxSeek`函数，对一个基数树迭代器进行初始化之后，便可以应用`raxNext`以及`raxPrev`函数对基数树进行迭代遍历。当迭代到达结束时，上述两个函数会返回0；否则函数返回1。
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
