@@ -312,6 +312,48 @@ typedef struct stream {
 3. `stream.last_id`，记录上一次生成的消息ID。
 4. `stream.cgroups`，同样是一个基数树，用于存储关联这个消息队列的**消费者组**，使用**消费者组**的名字作为基数树的*Key*。
 
+在`stream.rax`这个基数树中，以消息ID为*Key*，而对应的*Value*则是以前面我们介绍过的紧凑列表**listpack**。简单描述一下基数树使用紧凑列表来存储消息的布局：
+
+1. 每条消息的消息内容都存储在一个紧凑列表之中。
+2. 每个紧凑列表中可以保存多条消息，每个消息都是这个紧凑列表的一个`entry`。
+3. 紧凑列表会使用表中第一条消息的ID，记作`master_id`，作为这个紧凑列表在整个`stream.rax`基数树中的*Key*。
+4. 服务器在全局变量之中限制了单一紧凑列表的内存上限`redisServer.stream_node_max_bytes`以及单一紧凑列表最多可以容纳消息条数的上限`redisServer.stream_node_max_entries`。当超过整个上限，*Redis*会新分配一个紧凑列表存储在基数树之中。
+5. 当我们需要删除一条消息时，通常不是将这条消息从紧凑列表之中删除，而是将其设置为一个删除状态。因为删除会涉及到内存的移动已经重新分配，这样会大大地降低系统的性能。
+
+下面我们可以来看一下在紧凑列表中，消息是按照何种格式存储的。
+
+```
++-----------+-------+-------+-----+-------+
+|<MSGHeader>|<MSG-1>|<MSG-2>|.....|<MSG-N>|
++-----------+-------+-------+-----+-------+
+```
+
+在`MSGHeader`之中记录了当前这个
+
+```
++-------+---------+------------+---------+--/--+---------+---------+-+
+| count | deleted | num-fields | field_1 | field_2 | ... | field_N |0|
++-------+---------+------------+---------+--/--+---------+---------+-+
+```
+
+
+
+```
++-----+--------+----------+-------+-------+-/-+-------+-------+--------+
+|flags|entry-id|num-fields|field-1|value-1|...|field-N|value-N|lp-count|
++-----+--------+----------+-------+-------+-/-+-------+-------+--------+
+```
+
+
+
+```
++-----+--------+-------+-/-+-------+--------+
+|flags|entry-id|value-1|...|value-N|lp-count|
++-----+--------+-------+-/-+-------+--------+
+```
+
+
+
 ### 消费者组
 
 ```c
@@ -324,9 +366,9 @@ typedef struct streamCG {
 
 *Redis*使用`streamCG`来表示一个**消费者组**：
 
-1. `streamCG.last_id`
-2. `streamCG.pel`
-3. `streamCG.consumers`
+1. `streamCG.last_id`，消息派发游标，用于记录下一条需要发送给**消费者**的消息ID，每次**消费者**请求消息，**消费者组**便会将`streamCG.last_id`对应的消息发送给**消费者**，并将`streamCG.last_id`向后移动一位。
+2. `streamCG.pel`，这是一个基数树结构，用于存储未确认消息的列表。
+3. `streamCG.consumers`，同样时一个基数树结构，用于存储这个**消费者组**内的**消费者**，基数树的*Key*为**消费者**的名字，对应的`Value`为后面介绍的`streamConsumer`数据结构。
 
 ### 消费者
 
@@ -338,7 +380,11 @@ typedef struct streamConsumer {
 } streamConsumer;
 ```
 
+`streamConsumer`这个数据结构就是*Redis*用于表示**消费者**：
 
+1. `streamConsumer.seen_time`，记录**消费者**上次活动的时间戳。
+2. `streamConsumer.name`，存储**消费者**的名字。
+3. `streamConsumer.pel`，这个**消费者**对应的还没有确认的消息的列表。
 
 ### 未被确认的消息
 
@@ -350,7 +396,11 @@ typedef struct streamNACK {
 } streamNACK;
 ```
 
+`streamNACK`这个数据结构就是表示已被派发但是没有被确认的消息：
 
+1. `streamNACK.delivery_time`，记录该条消息上次被派发的时间戳。
+2. `streamNACK.delivery_count`，存储该条消息被派发的次数。
+3. `streamNACK.consumer`，记录该条消息上次被派发的**消费者**。
 
 ### Stream迭代器
 
@@ -373,11 +423,30 @@ typedef struct streamIterator {
 } streamIterator;
 ```
 
+在这个迭代器数据结构之中：
 
+1. `streamIterator.stream`
+2. `streamIterator.master_id`
+3. `streamIterator.master_field`
+4. `streamIterator.master_fields_start`
+5. `streamIterator.master_fields_ptr`
+6. `streamIterator.entry_flags`
+7. `streamIterator.rev`
+8. `streamIterator.start_key`
+9. `streamIterator.end_key`
+10. `streamIterator.lp`
+11. `streamIterator.lp_ele`
+12. `streamIterator.lp_flags`
+13. `streamIterator.field_buf`
+14. `streamIterator.value_buf`
 
 ## Redis中Stream的实现逻辑
 
+### Stream的基础实现
 
+### Stream的迭代器操作
+
+### Stream命令的实现
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
