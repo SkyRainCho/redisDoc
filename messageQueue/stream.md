@@ -328,7 +328,11 @@ typedef struct stream {
 +-----------+-------+-------+-----+-------+
 ```
 
-在`MSGHeader`之中记录了当前这个
+在`MSGHeader`之中记录了当前这个紧凑列表之中的**消息表头**，后面的`MSG-X`为存储这个紧凑列表之中的消息内容。
+
+
+
+首先我们来看一下紧凑列表之中这个消息表头的内存分布：
 
 ```
 +-------+---------+------------+---------+--/--+---------+---------+-+
@@ -336,7 +340,18 @@ typedef struct stream {
 +-------+---------+------------+---------+--/--+---------+---------+-+
 ```
 
+1. `count`之中记录这个紧凑列表之中存储的消息的数量。
+2. `deleted`中记录了这个紧凑列表之中被标记为删除的消息的数量。
+3. `fileds`这一组相关的数据是消息的`field`数据，使用的是第一个加入这个紧凑列表之中的消息的`field`数据。我们知道*Redis*消息队列之中的消息内容都是都按照`field-string`这样格式的键值对，而能够加入同一个消息队列中的消息，其键值对中的`fields`域大致应该是相同的。那么我们使用第一个加入这个紧凑列表中的消息的`fields`域来作为这个列表的公共`fields`域，如果后续消息的`fields`域与第一个消息相同，那么可以公用这个紧凑列表中`MSGHeader`里的`fields`域，以达到节省内存的目的。
+   1. `num-fields`用于记录这个公用消息`fields`域中`field`的个数。
+   2. `field_XXX`则是用于记录每个`field`的具体内容。
+4. 最后一个`0`字符，相当于一个特殊的标记，用于标记`MSGHeader`的结束。
 
+
+
+在这个`MSGHeader`之后，便是每条消息的具体内容，由于紧凑列表之中的消息有可能会被标记为已经删除的状态，因此*Redis*出了一个状态定义`STREAM_ITEM_FLAG_DELETED`用于表示这个节点是否已经被删除。同时*Redis*还给出了一个状态定义`STREAM_ITEM_FLAG_SAMEFIELDS`用于标记这个消息的`fields`域是否与整个紧凑列表的`fields`域相同，根据是否相同*Redis*对消息的内存分布格式给出两种定义。
+
+首先我们看一下`fields`与紧凑列表公共`fields`域不同的消息的存储格式：
 
 ```
 +-----+--------+----------+-------+-------+-/-+-------+-------+--------+
@@ -344,13 +359,25 @@ typedef struct stream {
 +-----+--------+----------+-------+-------+-/-+-------+-------+--------+
 ```
 
+在上面这个内存分布之中：
 
+1. `flags`，这个字段以掩码的形式记录了当前消息的状态，前面提到的`STREAM_ITEM_FLAG_DELETED`以及`STREAM_ITEM_FLAG_SAMEFIELDS`都会被记录在这里。
+2. `entry_id`，前面我们介绍了，在`stream.rax`这个基数树中，*Value*是存储消息的紧凑列表，而*Key*是紧凑列表之中第一条消息的ID，我们称之为`master_id`；同时我们也知道每条消息都用一个唯一的属于自己的ID。这里`entry_id`便是用于记录消息的ID，只不过不是消息的完整ID，而是记录的自身ID与`master_id`的差值。
+3. `num-fields`，由于这条消息的`fields`域与公共`fields`不相同，故此这里记录了该消息的键值对的个数。
+4. `field-value`，这一系列字段记录了消息的键值对之中的内容。
+5. `lp-count`，这个字段记录前面介绍的`flags`，`entry-id`等字段的个数，用于方便从后向前的反向查找。
+
+
+
+最后我们来看一下`fields`域与公共`fields`字段的
 
 ```
 +-----+--------+-------+-/-+-------+--------+
 |flags|entry-id|value-1|...|value-N|lp-count|
 +-----+--------+-------+-/-+-------+--------+
 ```
+
+这里类似`flags`、`entry-id`以及`lp-count`字段与前面的含义相同，只不过由于省区了`fields`域数据的存储，仅以`value-XXX`来存储每个`field`对应的`value`的数据。
 
 
 
@@ -415,6 +442,7 @@ typedef struct streamIterator {
     int rev;
     uint64_t start_key[2];
    	uint64_t end_key[2];
+    raxIterator ri;
     unsigned char *lp;
     unsigned char *lp_ele;
     unsigned char *lp_flags;
@@ -425,20 +453,21 @@ typedef struct streamIterator {
 
 在这个迭代器数据结构之中：
 
-1. `streamIterator.stream`
-2. `streamIterator.master_id`
-3. `streamIterator.master_field`
-4. `streamIterator.master_fields_start`
-5. `streamIterator.master_fields_ptr`
-6. `streamIterator.entry_flags`
-7. `streamIterator.rev`
-8. `streamIterator.start_key`
-9. `streamIterator.end_key`
-10. `streamIterator.lp`
-11. `streamIterator.lp_ele`
-12. `streamIterator.lp_flags`
-13. `streamIterator.field_buf`
-14. `streamIterator.value_buf`
+1. `streamIterator.stream`，记录了当前迭代器关联的消息队列`stream`的指针。
+2. `streamIterator.master_id`，记录迭代器当前所在的紧凑列表对应的`master_id`。
+3. `streamIterator.master_fields_count`，记录迭代器当前所在的紧凑列表之中公共`fields`域中`field`的个数。
+4. `streamIterator.master_fields_start`，记录迭代器当前所在的紧凑列表之中公共`fields`域中第一个`field`的指针。
+5. `streamIterator.master_fields_ptr`，迭代器用于遍历当前在的紧凑列表中公共`fields`域的指针。
+6. `streamIterator.entry_flags`，迭代器当前遍历消息的标记字段。
+7. `streamIterator.rev`，用于记录当前的迭代器是正向迭代器还是逆向迭代器。
+8. `streamIterator.start_key`，记录这个迭代器初始化时的起始消息ID，默认是`0-0`。
+9. `streamIterator.end_key`，记录这个迭代器初始化时的终止消息ID，默认是`UINT64_MAX-UINT64_MAX`。
+10. `streamIterator.ri`，表示这个迭代器用于迭代遍历`stream.rax`这个基数树的底层迭代器`raxIterator`。
+11. `streamIterator.lp`，记录迭代器当前指向的紧凑列表指针。
+12. `streamIterator.lp_ele`，这是迭代器在遍历当前紧凑列表时使用的，指向列表元素的一个内部指针。
+13. `streamIterator.lp_flags`，迭代器在当前的紧凑列表中指向列表中记录消息标记字段`flags`内存的指针，`streamIterator.entry_flags`可以通过这个字段解析获得。
+14. `streamIterator.field_buf`，迭代器用于遍历某一条消息的键值对时，存储当前所看到的`field`的内容。
+15. `streamIterator.value_buf`，迭代器用于遍历某一条消息的键值对时，存储当前所看到的`value`的内容。
 
 ## Redis中Stream的实现逻辑
 
