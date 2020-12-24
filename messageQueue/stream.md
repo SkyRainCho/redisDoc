@@ -53,10 +53,12 @@
 在*Redis*之中，每一个**Stream**都可以关联一个*Key*存储在内存数据的键空间之中，每一个**Stream**便是一个消息队列，消息队列可以被认为是一种先进先出的数据结构，属于这个消息队列的消息都会存储这个**Stream**对象之中，同时每个消息由一个唯一的消息ID以及消息内容构成。通过**XADD**命令，我们可以向一个消息队列之中压入一条消息，**XADD**命令的格式为：
 
 ```
-XADD key ID field string [field string ...]
+XADD key [MAXLEN [~|=] <count>] ID field string [field string ...]
 ```
 
 这条命令向`key`所对应的**Stream**对象之中加入一条消息；`ID`字段用于指定消息的ID，如果传入`*`则表示会由*Redis*自动生成一个消息ID，这个系统自动生成的消息ID由两部分组成并且都是64位整数，第一部分是一个毫秒级的时间戳，第二部分则是一个自增的序列号，每一毫秒会清零一次；而消息的内容则是由`field`以及`string`参数构成，这相当于是一个键值对，一条消息至少要由一组键值对，由可以拥有多个键值对。命令执行成功后，会将消息的ID返回给命令的调用者。这里*Redis*强烈简易，使用系统自动生成的消息ID，而不要用自己定义的消息ID。
+
+同时我们可以通过`MAXLEN`这个可选参数来设置这个消息队列的最大长度。如果我们使用`MAXLEN = <count>`的形式来限制消息列队的最大长度，则这个长度限制是准确的，也就是以`count`参数为上限；然后当我们采用`MAXLEN ~ <count>`的形式来限制消息对了的长度时，则是才有近似的方式进行限制，也就是该消息队列的真实长度可能会比`count`稍微大一些，但是绝对不会低于`count`这个数量限制。近似长度限制的运行效率要大于准确长度限制的运行效率。
 
 接下来我们可以通过**XLEN**命令来获取指定消息队列**Stream**对象内消息的数量，这个命令的格式为：
 
@@ -473,9 +475,126 @@ typedef struct streamIterator {
 
 ### Stream的基础实现
 
+#### StreamID的基础操作
+
+#### Stream中消息的插入与删除
+
 ### Stream的迭代器操作
 
-### Stream命令的实现
+#### 迭代器基础操作
+
+我们先来看一下，*Redis*对于消息队列迭代器的基础操作接口：
+
+1. ```c
+   void streamIteratorStart(streamIterator *si, stream *s, streamID *start, streamID *end, int rev);
+   ```
+
+   这个函数用于初始化一个消息队列迭代器`si`。该函数会将迭代器`si`与消息队列`s`相关联；同时通过`start`以及`end`这两个参数用于限定迭代遍历的范围，这两个范围上下限可以为空值，分别对应`0`以及`UINT64_MAX`；最后可以通过`rev`来指定遍历方向。
+
+2. ```c
+   void streamIteratorStop(streamIterator *si)
+   ```
+
+   这个函数用于释放一个消息队列迭代器`si`。
+
+3. ```c
+   int streamIteratorGetID(streamIterator *si, streamID *id, int64_t *numfields);
+   ```
+
+   这个函数用于实现对消息队列之中的消息进行遍历，每次遍历会通过`id`返回消息对应的消息ID，以及通过`numfields`参数来返回该消息拥有的键值对的数量。如果遍历到达了结束的位置，则函数会返回0；否则函数会返回1，表示当前可以遍历到一条合法的消息。仅仅通过`streamIteratorStart`函数初始化后的迭代器无法直接对数据进行操作，需要通过`streamIteratorGetID`这个函数调用之后，才可以真正地对消息队列之中的消息进行访问。
+
+4. ```c
+   void streamIteratorGetField(streamIterator *si, unsigned char **fieldptr, unsigned char **valueptr, int64_t *fieldlen, int64_t *valuelen);
+   ```
+
+   这个函数用于遍历一条消息的键值对，每次调用会从迭代器当前消息的键值对之中，通过`fieldptr`以及`fieldlen`来返回键数据；通过`valueptr`以及`valuelen`来返回值数据。
+
+5. ```c
+   void streamIteratorRemoveEntry(streamIterator *si, streamID *current);
+   ```
+
+   这个函数用于删除迭代器当前对应的消息，不过我们需要显式地提供消息ID。如果该消息所在的紧凑列表只有该条消息这一个未删除的消息，那么就可以将这个紧凑列表从消息队列的基数树之中删除；如果该消息所在的紧凑列表还有其他的未删除消息，那么仅需要将这个消息加上删除标记`STREAM_ITEM_FLAG_DELETED`。删除这条当前的消息之后，迭代器会被重新定位到下一条消息之上。
+
+#### 迭代器使用范式
+
+结合上面关于消息队列迭代器的基础操作，我们可以总结出迭代器使用的两个范式：
+
+1. 对消息队列之中一定范围内的消息进行迭代遍历：
+
+   ```c
+   streamIterator myiterator;
+   streamIteratorStart(&myiterator, ...);
+   int64_t numfields;
+   while(streamIteratorGetID(&myiterator,&ID,&numfields))
+   {
+       while (numfields) {
+           unsigned char *key, *value;
+           size_t key_len, value_len;
+           streamIteratorGetField(&myiterator,&key,&value,&key_len,&value_len);
+           //对收集到的键值对进行处理
+       }
+   }
+   ```
+
+   这里我们可以看到遍历消息队列的一个基本流程，即先通过`streamIteratorStart`对迭代器进行初始化；然后通过`streamIteratorGetID`函数对消息进行遍历，获取到消息ID，以及该条消息中的键值对的个数；最后通过`streamIteratorGetField`函数完成对当前消息中键值对数据的遍历。
+
+2. 通过迭代器删除指定ID的消息：
+
+   ```c
+   streamIterator si;
+   streamIteratorStart(&si, s, id, id, 0);
+   streamID myid;
+   int64_t numfields;
+   if (streamIteratorGetID(&si, &myid, &numfields))
+   {
+       streamIteratorRemoveEntry(&si, &myid);
+   }
+   streamItertorStop(&si);
+   ```
+
+   
+
+### Stream消费者组的实现
+
+首先我们来看一组关于消息队列之中，**消费者组**相关的底层函数接口：
+
+1. ```c
+   streamNACK *streamCreateNACK(streamConsumer *consumer);
+   ```
+
+   这个函数用于从一个**消费者**`consumer`来创建一个未确认消息对象`streamNACK`。
+
+2. ```c
+   void streamFreeConsumer(streamConsumer* sc);
+   ```
+
+   这个函数用于释放一个给定的**消费者**`sc`。
+
+3. ```c
+   streamCG *streamCreateCG(stream *s, char *name, size_t namelen, streamID *id);
+   ```
+
+   这个函数用于在一个给定的消息队列`s`上，创建一个名为`name`的**消费者组**。同时会指定**消费者组**的派发游标`streamCG.last_id`，并会将这个新的**消费者组**加到消息队列的**消费者组**队列之中`stream.cgroups`。
+
+4. ```c
+   void streamFreeCG(streamCG *cg);
+   ```
+
+   这个函数用于释放一个给定的**消费者组**。
+
+5. ```c
+   streamConsumer *streamLookupConsumer(streamCG *cg, sds name, int create);
+   ```
+
+   这个函数用于从`cg`这个**消费者组**中查找名为`name`的**消费者**。在没有找到的情况下，如果`create`不为0，那么会创建一个新的**消费者**加入到**消费者组**中，并返回这个新的**消费者**；否则返回`NULL`。
+
+6. ```c
+   uint64_t streamDelConsumer(streamCG *cg, sds name);
+   ```
+
+   这个函数则用于从`cg`这个**消费者组**中删除一个名为`name`的**消费者**。同时也会释放未确认消息队列**PEL**之中的与这个**消费者**相关的未确认消息对象`streamNACK`。
+
+
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
