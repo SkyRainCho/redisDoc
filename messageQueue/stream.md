@@ -332,8 +332,6 @@ typedef struct stream {
 
 在`MSGHeader`之中记录了当前这个紧凑列表之中的**消息表头**，后面的`MSG-X`为存储这个紧凑列表之中的消息内容。
 
-
-
 首先我们来看一下紧凑列表之中这个消息表头的内存分布：
 
 ```
@@ -369,8 +367,6 @@ typedef struct stream {
 4. `field-value`，这一系列字段记录了消息的键值对之中的内容。
 5. `lp-count`，这个字段记录前面介绍的`flags`，`entry-id`等字段的个数，用于方便从后向前的反向查找。
 
-
-
 最后我们来看一下`fields`域与公共`fields`字段的
 
 ```
@@ -380,8 +376,6 @@ typedef struct stream {
 ```
 
 这里类似`flags`、`entry-id`以及`lp-count`字段与前面的含义相同，只不过由于省区了`fields`域数据的存储，仅以`value-XXX`来存储每个`field`对应的`value`的数据。
-
-
 
 ### 消费者组
 
@@ -495,17 +489,108 @@ typedef struct streamIterator {
    void streamEncodeID(void *buf, streamID *id);
    ```
 
-   这个函数用于将
+   这个函数用于将一个`streamID`按照大端的字节序列编码成一个128比特的数据，这样可以保证编码后的数据依然是满足字典顺序的。
 
 4. ```c
    void streamDecodeID(void *buf, streamID *id);
    ```
 
+   这个函数用于将一个128比特的数据解码成一个`streamID`对象。
+   
 5. ```c
    int streamCompareID(streamID *a, streamID *b);
    ```
+   
+   用于比较两个`streamID`对象的大小。
+
+#### Stream中消费者组的基础操作
+
+首先我们来看一组关于消息队列之中，**消费者组**相关的底层函数接口：
+
+1. ```c
+   streamNACK *streamCreateNACK(streamConsumer *consumer);
+   ```
+
+   这个函数用于从一个**消费者**`consumer`来创建一个未确认消息对象`streamNACK`。
+
+2. ```c
+   void streamFreeConsumer(streamConsumer* sc);
+   ```
+
+   这个函数用于释放一个给定的**消费者**`sc`。
+
+3. ```c
+   streamCG *streamCreateCG(stream *s, char *name, size_t namelen, streamID *id);
+   ```
+
+   这个函数用于在一个给定的消息队列`s`上，创建一个名为`name`的**消费者组**。同时会指定**消费者组**的派发游标`streamCG.last_id`，并会将这个新的**消费者组**加到消息队列的**消费者组**队列之中`stream.cgroups`。
+
+4. ```c
+   void streamFreeCG(streamCG *cg);
+   ```
+
+   这个函数用于释放一个给定的**消费者组**。
+
+5. ```c
+   streamConsumer *streamLookupConsumer(streamCG *cg, sds name, int create);
+   ```
+
+   这个函数用于从`cg`这个**消费者组**中查找名为`name`的**消费者**。在没有找到的情况下，如果`create`不为0，那么会创建一个新的**消费者**加入到**消费者组**中，并返回这个新的**消费者**；否则返回`NULL`。
+
+6. ```c
+   uint64_t streamDelConsumer(streamCG *cg, sds name);
+   ```
+
+   这个函数则用于从`cg`这个**消费者组**中删除一个名为`name`的**消费者**。同时也会释放未确认消息队列**PEL**之中的与这个**消费者**相关的未确认消息对象`streamNACK`。
 
 #### Stream中消息的插入与删除
+
+接下来我们看一下如何向消息队列之中插入一条新的消息：
+
+```c
+int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_id, streamID *use_id);
+```
+
+`streamAppendItem`用于向一个指定的消息队列之中插入一条新的消息。如果参数`added_id`不为`NULL`，那么新消息对应的消息ID将会通过`added_id`进行返回；如果`use_id`参数为`NULL`，这表示该条新消息将使用系统自动生成的消息ID，也就是根据`stream.last_id`来生成新的ID，否则使用调用者给出的`use_id`作为新消息的ID。
+
+`streamAppendItem`是消息队列插入逻辑底层实现函数，而前面所介绍的消息在消息队列对应基数树中存储方式的细节，都是在这个函数之中实现的。
+
+而从消息队列之中的删除一条指定的消息，则是通过下面的函数来实现的：
+
+```c
+int streamDeleteItem(stream *s, streamID *id);
+```
+
+这个函数会使用后续介绍的迭代器操作来对给定ID的消息进行删除。
+
+除了删除单条消息的接口，*Redis*还提供了一个用于对消息队列按照指定的大小进行裁剪的函数接口：
+
+```c
+int64_t streamTrimByLength(stream *s, size_t maxlen, int approx);
+```
+
+当消息队列之中的消息数量过多时，我们可以通过`streamTrimByLength`这个函数接口来裁剪消息队列的大小，删除消息队列中过于老旧的消息。`maxlen`用于限定消息数量的上限，`approx`则是通知*Redis*是使用精确裁剪，还是使用近似裁剪。对于`stream.length > maxlen`的情况下，如果使用精确裁剪，那么裁剪的结果为`stream.length == maxlen`；而使用近似裁剪的方式，裁剪后的最终结果将是`stream.length >= maxlen`。
+
+我们知道，在消息队列的基数树之中，实际存储的是一个一个的紧凑列表，而每个紧凑列表又是多条相邻消息的集合。因此在裁剪时，会将较为老旧的紧凑列表通过`raxRemove`这个接口从基数树之中删除。而精确裁剪与近似裁剪的区别就在于对边界上紧凑列表的处理方式上，假设我们需要将消息队列裁剪到只剩下1000条消息，而从995条消息到1005条消息都是存储在同一个紧凑列表之中的，也就是第1000条消息恰好落在一个紧凑列表的中间，这是两种裁剪的不同处理方式就体现出来了：
+
+1. 近似裁剪方式，在处理到这个边界紧凑列表时，直接返回停止裁剪。此时消息队列之中还剩余1005条消息，虽然没有达到1000条的目的，但是由于*Redis*为每个紧凑列表所能容纳的消息数量做出了限制，因此剩余的消息数量不会大于`maxlen`很多，同时也保证了，绝对不会多删消息。
+2. 精确裁剪方式，则会遍历这个边界紧凑列表，将需要删除的消息设置上`STREAM_ITEM_FLAG_DELETED`标记，同时更新紧凑列表中已删除消息的计数。由于这种方式可能涉及到内存移动以及内存的重新分配，因此效率要低于近似的裁剪方式。
+
+而上面这个函数，也正是**XTRIM**命令的底层实现逻辑。
+
+#### Stream中消息的获取
+
+对于消息队列之中消息的获取，*Redis*给出了两个底层的操作接口。类似**XREAD**命令、**XRANGE**命令、**XREVRANGE**命令都是通过这里的底层操作接口来实现的；对于**消费者组**的操作中，**XREADGROUP**命令、**XPENDING**这两个**消费者**用于从**消费者组**中获取消息的命令，也是通过这里的底层接口来实现。
+
+首先我们来看一下从消息队列之中获取消息的函数接口：
+
+````c
+size_t streamReplyWithRange(client *c, stream *s, streamID *start, streamID *end, size_t count, int rev, streamCG *group, streamConsumer *consumer, int flags, streamPropInfo *spi);
+````
+
+这个函数会将消息队列`s`上的ID范围在`[start, end]`闭区间范围内的消息，发送给客户端`c`；`count`参数如果不为0，则会按照顺序从区间内返回`count`条消息发送给客户端；而`rev`则指定了消息的方向，究竟是从前向后发送，还是从后先前发送。
+
+如果参数`group`以及`consumer`这两个参数不为空的时候，表示是在处理**XREADGROUP**命令通过**消费者组**来获取消息的情况，因为**XREADGROUP**命令与**XREAD**命令一样，底层都是通过`streamReplyWithRange`这个函数来实现的。
 
 ### Stream的迭代器操作
 
@@ -580,49 +665,7 @@ typedef struct streamIterator {
    streamItertorStop(&si);
    ```
 
-   
-
-### Stream消费者组的实现
-
-首先我们来看一组关于消息队列之中，**消费者组**相关的底层函数接口：
-
-1. ```c
-   streamNACK *streamCreateNACK(streamConsumer *consumer);
-   ```
-
-   这个函数用于从一个**消费者**`consumer`来创建一个未确认消息对象`streamNACK`。
-
-2. ```c
-   void streamFreeConsumer(streamConsumer* sc);
-   ```
-
-   这个函数用于释放一个给定的**消费者**`sc`。
-
-3. ```c
-   streamCG *streamCreateCG(stream *s, char *name, size_t namelen, streamID *id);
-   ```
-
-   这个函数用于在一个给定的消息队列`s`上，创建一个名为`name`的**消费者组**。同时会指定**消费者组**的派发游标`streamCG.last_id`，并会将这个新的**消费者组**加到消息队列的**消费者组**队列之中`stream.cgroups`。
-
-4. ```c
-   void streamFreeCG(streamCG *cg);
-   ```
-
-   这个函数用于释放一个给定的**消费者组**。
-
-5. ```c
-   streamConsumer *streamLookupConsumer(streamCG *cg, sds name, int create);
-   ```
-
-   这个函数用于从`cg`这个**消费者组**中查找名为`name`的**消费者**。在没有找到的情况下，如果`create`不为0，那么会创建一个新的**消费者**加入到**消费者组**中，并返回这个新的**消费者**；否则返回`NULL`。
-
-6. ```c
-   uint64_t streamDelConsumer(streamCG *cg, sds name);
-   ```
-
-   这个函数则用于从`cg`这个**消费者组**中删除一个名为`name`的**消费者**。同时也会释放未确认消息队列**PEL**之中的与这个**消费者**相关的未确认消息对象`streamNACK`。
-
-
+   前面介绍的，通过`streamDeleteItem`来删除消息队列之中指定ID消息，就是通过上面这种范式来实现的。
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
