@@ -477,6 +477,34 @@ typedef struct streamIterator {
 
 #### StreamID的基础操作
 
+对于消息ID`streamID`，*Redis*给出了若干基础的操作函数接口：
+
+1. ```c
+   void streamIncrID(streamID *id);
+   ```
+
+   这个函数用于递增一个ID的序号部分`streamID.seq`。虽然不太可能，但是一旦`streamID.seq`这个字段超过了`UINT64_MAX`的限制，就需要在ID的时间戳部分`streamID.ms`上进一位。
+
+2. ```c
+   void streamNextID(streamID *last_id, streamID *new_id);
+   ```
+
+   这个函数会根据给定的消息ID`last_id`来生成下一个新的消息ID`new_id`。
+
+3. ```c
+   void streamEncodeID(void *buf, streamID *id);
+   ```
+
+   这个函数用于将
+
+4. ```c
+   void streamDecodeID(void *buf, streamID *id);
+   ```
+
+5. ```c
+   int streamCompareID(streamID *a, streamID *b);
+   ```
+
 #### Stream中消息的插入与删除
 
 ### Stream的迭代器操作
