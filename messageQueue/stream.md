@@ -590,17 +590,33 @@ size_t streamReplyWithRange(client *c, stream *s, streamID *start, streamID *end
 
 这个函数会将消息队列`s`上的ID范围在`[start, end]`闭区间范围内的消息，发送给客户端`c`；`count`参数如果不为0，则会按照顺序从区间内返回`count`条消息发送给客户端；而`rev`则指定了消息的方向，究竟是从前向后发送，还是从后先前发送。
 
-如果参数`group`以及`consumer`这两个参数不为空的时候，表示是在处理**XREADGROUP**命令通过**消费者组**来获取消息的情况，因为**XREADGROUP**命令与**XREAD**命令一样，底层都是通过`streamReplyWithRange`这个函数来实现的。
+如果参数`group`以及`consumer`这两个参数不为空的时候，表示是在处理**XREADGROUP**命令通过**消费者组**来获取消息的情况，因为**XREADGROUP**命令与**XREAD**命令一样，底层都是通过`streamReplyWithRange`这个函数来实现的。这种情况下会执行下面三个额外的工作：
+
+1. 如果我们发送的消息ID大于**消费者组**中的`streamCG.last_id`，那么这个函数会更新`streamCG.last_id`。
+2. 如果请求的ID已经被分配给其他的**消费者**，那么这个函数就不会将对应的消息返回给客户端。
+3. 每条第一次被发送`consumer`这个**消费者**的消息，会在**PEL**列表之中创建一条对应的记录`streamNACK`。
 
 `streamReplyWithRange`这个函数使用消息队列迭代器的迭代范式，对消息队列之中给定范围的消息进行迭代，将其发送给请求的客户端。如果客户端是以**消费者**的身份从**消费者组**中获取消息的话，`streamReplyWithRange`这个函数也会为维护**消费者组**上的**PEL**队列，尝试将这些已发送但是还没有被确认的消息加入**PEL**队列。
 
-同时*Redis*提供了另外一个函数接口，用于从**消费者**的**PEL**队列之中请求未被确认的消息：
+上面这个`streamReplyWithRange`函数的主要逻辑是从消息队列的基数树之中获取消息的。同时*Redis*提供了另外一个函数接口，用于从**消费者**的**PEL**队列之中请求未被确认的消息：
 
 ```c
 size_t streamReplyWithRangeFromConsumerPEL(client *c, stream *s, streamID *start, streamID *end, size_t count, streamConsumer *consumer);
 ```
 
-这个函数会遍历**消费者**的**PEL**队列之中`streamNACK`对象，并将对应的消息发送给**消费者**所对应的客户端。
+这个函数会遍历**消费者**的**PEL**队列之中`streamNACK`对象，并将对应的消息发送给**消费者**所对应的客户端。这个函数主要用于实现**XREADGROUP**命令下面的这种格式形式：
+
+```
+XREADGGROUP GROUP group consumer STREAMS key ID
+```
+
+即指定了消息的ID，意味着客户端在请求曾经发送给该`consumer`的某条违背确认的ID的消息。由于消息有可能已经被删除，因此这个函数会从**PEL**中查找到对应消息后，在从消息队列的基数树中进行查询，以校验消息是否存在。不过这也意味着该函数的执行效率会稍微慢一些。
+
+#### Stream中消息的确认
+
+*Redis*对于消息的确认是使用**XACK**这个命令来实现的，代码层面则是使用`xackCommand`这个函数来作为**XACK**命令的实现函数。前面我们介绍过**XACK**命令的格式，我们发现这里并没有一个指定**消费者**的参数，这里可以理解消息队列中的**消费者组**本身不关系是哪个**消费者**确认了这条消息，它实际上更加关注的是哪些消息已经被确认了。
+
+`xackCommand`这个函数之中，其处理逻辑也是先从`streamCG.pel`中查找对应的`streamNACK`对象，在通过`streamNACK.consumer`反向查找其对应的**消费者**，最终将这个`streamNACK`对象从两个**PEL**列表之中删除。
 
 ### Stream的迭代器操作
 
