@@ -592,6 +592,16 @@ size_t streamReplyWithRange(client *c, stream *s, streamID *start, streamID *end
 
 如果参数`group`以及`consumer`这两个参数不为空的时候，表示是在处理**XREADGROUP**命令通过**消费者组**来获取消息的情况，因为**XREADGROUP**命令与**XREAD**命令一样，底层都是通过`streamReplyWithRange`这个函数来实现的。
 
+`streamReplyWithRange`这个函数使用消息队列迭代器的迭代范式，对消息队列之中给定范围的消息进行迭代，将其发送给请求的客户端。如果客户端是以**消费者**的身份从**消费者组**中获取消息的话，`streamReplyWithRange`这个函数也会为维护**消费者组**上的**PEL**队列，尝试将这些已发送但是还没有被确认的消息加入**PEL**队列。
+
+同时*Redis*提供了另外一个函数接口，用于从**消费者**的**PEL**队列之中请求未被确认的消息：
+
+```c
+size_t streamReplyWithRangeFromConsumerPEL(client *c, stream *s, streamID *start, streamID *end, size_t count, streamConsumer *consumer);
+```
+
+这个函数会遍历**消费者**的**PEL**队列之中`streamNACK`对象，并将对应的消息发送给**消费者**所对应的客户端。
+
 ### Stream的迭代器操作
 
 #### 迭代器基础操作
