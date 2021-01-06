@@ -98,25 +98,131 @@ SCRIPT LOAD script
 SCRIPT KILL
 ```
 
-这个命令执行之后，执行这个脚本的客户端会从**EVAL**命令的阻塞状态中退出，并收到一个错误作为返回值。
-
-
-
-
-
-
-
-
-
-
-
-
+这个命令执行之后，执行这个脚本的客户端会从**EVAL**命令的阻塞状态中退出，并收到一个错误作为返回值。这个命令只会杀掉那些执行只读命令的Lua脚本，对于执行过写命令的脚本，`SCRIPT KILL`命令无法将其杀掉，对于这种情况，说明了*Redis*数据库内存中的数据已经被污染，唯一可行的方案就是将*Redis*服务器关掉，防止污染数据被写入磁盘，我们可以通过下面的这条命令来以不存盘的方式关闭*Redis*服务器：
+```
+SHUTDOWN NOSAVE
+```
 
 ## Redis脚本代码实现
 
 ### Redis脚本数据结构
 
+在*Redis*服务器的全局变量之中，定义执行Lua脚本的相关数据结构：
+```c
+struct redisServer {
+    ...
+    lua_State *lua;
+    client *lua_client;
+    client *lua_caller;
+    dict *lua_scripts;
+    unsigned long long lua_scripts_mem;
+    mstime_t lua_time_limit;
+    mstime_t lua_time_start;
+    int lua_write_dirty;
+    int lua_random_dirty;
+    int lua_replicate_commands;
+    int lua_multi_emmitted;
+    int lua_repl;
+    int lua_timeout;
+    int lua_kill;
+    int lua_always_replicate_comnands;
+};
+```
+这些数据字段之中：
+1. `redisServer.lua`，这是一个Lua解释器对象，整个*Redis*服务器所有的客户端只需要一个Lua解释器。
+1. `redisServer.lua_client`，这是一个伪客户端，用于执行Lua脚本之中通过`redis.call`调用的*Redis*命令。
+1. `redisServer.lua_caller`，当前正在执行Lua脚本的客户端，如果当前没有执行Lua脚本，这个指针会被设置为`NULL`。
+1. `redisServer.lua_scripts`，这是一个哈希表，用于存储脚本SHA1哈希值与缓存的Lua脚本代码段的映射关系。
+1. `redisServer.lua_scripts_mem`，记录了缓存Lua脚本代码段占用的内存。
+1. `redisServer.lua_time_limit`，配置的Lua脚本执行时间上限，如果脚本执行的时间超过这个上限则认为是执行超时。
+1. `redisServer.lua_time_start`，记录当前Lua脚本执行的启动时间戳。
+1. `redisServer.lua_write_dirty`，如果当前Lua脚本中执行的*Redis*命令修改了键空间之中的数据，这个字段会被设置为1。
+1. `redisServer.lua_random_dirty`，如果当前Lua脚本中执行的*Redis*命令是带有随机标记`CMD_RANDOM`，这个字段会被设置为1。
+1. `redisServer.lua_replicate_commands`，
+1. `redisServer.lua_multi_emmitted`，
+1. `redisServer.lua_repl`，
+1. `redisServer.lua_timeout`，如果脚本执行的时间超过了`redisServer.lua_time_limit`设置的上限，那么这个字段会被设置为1。
+1. `redisServer.lua_kill`，如果脚本执行时间超时，其他用户可以执行`SCRIPT KILL`命令将这个字段设置为1，后续脚本会判断这个字段是否为1来决定是否终止脚本运行。
+1. `redisServer.lua_always_replicate_comnands`，
+
+
 ### Redis脚本实现逻辑
+
+首先*Redis*会通过`sha1hex`这个函数来计算Lua脚本代码段的SHA1哈希值：
+```c
+void sha1hex(char *digest, char *script, size_t len);
+```
+脚本的哈希值可以通过`digest`参数进行返回。
+
+下面我们按照不同的功能分组，来看一下代码的实现逻辑。
+
+#### Redis与Lua的数据转换
+
+这里我们先来看一下，前面在概述之中介绍的*Redis*数据类型与Lua数据之间的转换。
+
+##### Redis到Lua数据的转换
+
+首先*Redis*定义了下面5个函数，用于实现底层的*Redis*数据到Lua数据的转换：
+```c
+char *redisProtocolToLuaType_Int(lua_State *lua, char *reply);
+char *redisProtocolToLuaType_Bulk(lua_State *lua, char *reply);
+char *redisProtocolToLuaType_Status(lua_State *lua, char *reply);
+char *redisProtocolToLuaType_Error(lua_State *lua, char *reply);
+char *redisProtocolToLuaType_MultiBulk(lua_State *lua, char *reply)
+```
+这些函数的名字明显地指明了这些函数的功能，分别用于将`reply`数据之中的整数、块数据、状态信息、错误信息，多块数据压入到Lua的虚拟栈之中，这里需要注意如下内容：
+1. `redisProtocolToLuaType_Bulk`这个函数中，如果块数据为空，那么会调用`lua_pushboolean`向虚拟栈中压入一个`false`值；否则调用`lua_pushstring`函数将块数据作为Lua字符串压入Lua虚拟栈。
+1. `redisProtocolToLuaType_Status`以及`redisProtocolToLuaType_Error`这两个函数，都会向Lua虚拟栈之中压入一个Lua的表数据，并向这个表中插入域值对`["ok"] = status`或者`["err"] = error_message`。
+
+通过上面这个5个函数，*Redis*定义了一个更高级的函数接口用于将*Redis*的数据压入Lua虚拟栈：
+```c
+char *redisProtocolToLuaType(lua_State *lua, char* reply);
+```
+这个函数会根据`reply`之中的特殊前缀也就是第一个字符，来对应数据类型的转换：
+1. `:`，需要转换为整数。
+1. `$`，需要转换为块数据。
+1. `+`，需要转换为状态数据。
+1. `-`，需要转换为错误数据。
+1. `*`，需要转换为多块数据。
+
+##### Lua到Redis数据的转换
+而Lua数据到*Redis*数据的转换则是通过单独的一个函数来实现的：
+```c
+void luaReplyToRedisReply(client *c, lua_State *lua);
+```
+这个函数的逻辑为：
+1. 首先会通过`lua_type`函数获取Lua虚拟栈的栈顶元素类型。
+1. 如果栈顶元素类型为`LUA_TSTRING`、`LUA_TBOOLEAN`、`LUA_TNUMBER`，那么执行将对应的数据转换为*Redis*的Reply数据。
+1. 如果栈顶元素类型为`LUA_TTABLE`，则会根据Lua表中的数据内容，将其转化为*Redis*的状态、错误以及多块数据。
+
+
+
+#### Lua脚本之中的Redis接口
+前面我们介绍了，可以在Lua脚本代码段之中通过`redis.call`以及`redis.pcall`接口调用*Redis*的原生命令。除了上述两个接口之外，*Redis*还定义了若干个C语言接口共Lua脚本代码段之中进行调用。
+
+|*Redis*的C语言接口|lua代码|接口含义|
+|-----------------|--------|--------|
+|`int luaRedisCallCommand(lua_State *lua)`|`redis.call`|Lua代码中用于调用*Redis*原生命令的接口|
+|`int luaRedisPCallCommand(lua_State *lua)`|`redis.pcall`|Lua代码中用于调用*Redis*原生命令的接口|
+|`int luaRedisSha1hexCommand(lua_State *lua)`|`redis.sha1hex`|Lua代码中用于计算一个字符串的SHA1哈希值|
+|`int luaRedisErrorReplyCommand(lua_State *lua)`|`redis.error_reply`|在Lua代码中，向Lua虚拟栈压入错误信息|
+|`int luaRedisStatusReplyCommand(lua_State *lua)`|`redis.status_reply`|在Lua代码中，向Lua虚拟栈压入状态信息|
+|`int luaRedisReplicateCommandsCommand(lua_State *lua)`|`redis.replicate_commands`||
+|`int luaRedisSetReplCommand(lua_State *lua)`|`redis.set_repl`||
+|`int luaLogCommand(lua_State *lua)`|`redis.log`||
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
