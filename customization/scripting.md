@@ -207,9 +207,14 @@ void luaReplyToRedisReply(client *c, lua_State *lua);
 |`int luaRedisSha1hexCommand(lua_State *lua)`|`redis.sha1hex`|Lua代码中用于计算一个字符串的SHA1哈希值|
 |`int luaRedisErrorReplyCommand(lua_State *lua)`|`redis.error_reply`|在Lua代码中，向Lua虚拟栈压入错误信息|
 |`int luaRedisStatusReplyCommand(lua_State *lua)`|`redis.status_reply`|在Lua代码中，向Lua虚拟栈压入状态信息|
-|`int luaRedisReplicateCommandsCommand(lua_State *lua)`|`redis.replicate_commands`||
+|`int luaRedisReplicateCommandsCommand(lua_State *lua)`|`redis.replicate_commands`|如果截止这个接口前，脚本没有执行过写命令的话，这个接口可以开启单一命令的复制并返回`true`；否则这个接口会返回`false`，并继续坚持整个脚本的复制工作。|
 |`int luaRedisSetReplCommand(lua_State *lua)`|`redis.set_repl`||
-|`int luaLogCommand(lua_State *lua)`|`redis.log`||
+|`int luaLogCommand(lua_State *lua)`|`redis.log`|通过这个接口可以向*Redis*服务器的日志系统之中添加日志|
+
+在上述这些函数接口之中，比较重要的是在Lua脚本代码段之中，通过`redis.call`以及`redis.pcall`来调用*Redis*原生命令的接口，这两个接口都是通过下面这个函数来实现的：
+```c
+int luaRedisGenericCommand(lua_State *lua, int raise_error);
+```
 
 
 
