@@ -49,12 +49,13 @@ EVALSHA sha1 numkeys key [key ...] arg [arg ...]
 在这条命令之中，用户不用提交Lua脚本的代码段，而是通过`sha1`参数提交缓存的Lua代码段对应的`sha1`哈希值，这样*Redis*会通过`sha1`这个哈希值查找到缓存的Lua代码段，然后执行这个Lua代码段之中的逻辑。
 
 在*Redis*服务器运行Lua脚本代码时，需要将*Redis*的数据类型作为参数传入Lua环境，在脚本代码结束时需要将Lua数据类型作为返回值返回给*Redis*服务器，下面这个表格便是*Redis*数据与Lua数据的对应转化关系：
-
+Reds
 | Redis 数据类型 | Lua 数据类型 | 含义 |
 | -------------- | ------------ | ---- |
 |                |              |      |
 
 
+在*Redis*的原生命令之中一些命令属于带有不确定性的命令，例如**HKEYS**这样的命令，即使两个内容完全相同的散列对象，也会因为键值对插入的顺序不同而导致**HKYES**命令的返回结果不同。如果在Lua脚本之中调用这些带有不确定性的命令，*Reds*会通过一个辅助的函数对结果进行排序。这样可以保证，只要两个对象的数据集是一样的，
 
 ### SCRIPT命令
 
@@ -195,7 +196,18 @@ void luaReplyToRedisReply(client *c, lua_State *lua);
 1. 如果栈顶元素类型为`LUA_TSTRING`、`LUA_TBOOLEAN`、`LUA_TNUMBER`，那么执行将对应的数据转换为*Redis*的Reply数据。
 1. 如果栈顶元素类型为`LUA_TTABLE`，则会根据Lua表中的数据内容，将其转化为*Redis*的状态、错误以及多块数据。
 
+#### 辅助函数
+前面提到了，*Redis*在执行Lua脚本的过程之中，会对带有不确定性的命令的输出结果进行排序，这个功能*Redis*是通过下面这个辅助函数来实现的：
+```c
+void luaSortArray(lua_State *lua);
+```
+`luaSortArray`这个函数会通过Lua语言之中的`table.sort`接口，对Lua虚拟栈之中的命令返回数据进行排序，使之有序。
 
+Lua语言之中的一些全局函数例如`loadfile`，*Redis*不希望能在脚本之中能够被使用，因此通过`luaRemoveUnsupportedFunctions`接口将这些函数从Lua环境之中移除。
+```c
+void luaRemoveUnsupportedFunctions(lua_State *lua);
+```
+这个函数会通过将指定的Lua全局函数的函数名设置为`nil`，来从Lua环境之中将这些函数移除的。
 
 #### Lua脚本之中的Redis接口
 前面我们介绍了，可以在Lua脚本代码段之中通过`redis.call`以及`redis.pcall`接口调用*Redis*的原生命令。除了上述两个接口之外，*Redis*还定义了若干个C语言接口共Lua脚本代码段之中进行调用。
@@ -215,8 +227,21 @@ void luaReplyToRedisReply(client *c, lua_State *lua);
 ```c
 int luaRedisGenericCommand(lua_State *lua, int raise_error);
 ```
+在这个函数之中，会执行如下的逻辑：
+1. 通过`lua_gettop`接口我们可以获取Lua虚拟栈中的参数个数并检查参数的个数，`redis.call`以及`redis.pcall`函数至少需要一个参数作为*Redis*命令的名字。
+1. 从Lua的虚拟栈之中解析出`redis.call`或者`redis.pcall`函数的参数。这里需要注意的是，这些参数必须是整数或者字符串形式的参数，我们在脚本之中向`redis.call`函数中传输其他类型的参数。
+1. 将解析出来的参数传入*Redis*用于在脚本之中执行原生命令的伪客户端`redisServer.lua_client`之中。
+1. 通过`lookupCommand`接口查找待执行的命令，判断参数个数，并检查这个命令是否禁止在Lua脚本之中执行（命令携带了`CMD_NOSCRIPT`标记）。
+1. 如果脚本命令是一个写命令`CMD_WRITE`，那么会检查当前的脚本之中是否可以执行写命令。
+1. 检查是否已经达到内存使用的上限，
+1. 根据命令的类型，如果是写命令`CMD_WRITE`，则将`redisServer.lua_write_dirty`设置为1；如果是随机命令`CMD_RANDOM`，则将`redisServer.lua_random_dirty`字段设置为1。
+1. 通过`call`接口来执行*Redis*的原生命令。
+1. 从`redisServer.lua_client`这个伪客户端之中将应用层输出缓存之中的内容，通过前面介绍的`redisProtocolToLuaType`接口转换为Lua数据类型，作为返回值压入Lua虚拟栈。
+1. 最后，如果执行的这个*Redis*原生命令是带有不确定性的命令，那么会通过`luaSortArray`接口对Lua栈之中的数据进行排序。
 
+#### Lua环境的初始化
 
+现在我们来看看，*Redis*是如何初始化一个Lua环境的
 
 
 
