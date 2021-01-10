@@ -209,6 +209,14 @@ void luaRemoveUnsupportedFunctions(lua_State *lua);
 ```
 这个函数会通过将指定的Lua全局函数的函数名设置为`nil`，来从Lua环境之中将这些函数移除的。
 
+同时，为了防止数据的残留，*Redis*禁止在Lua脚本之中声明任何全局变量；但是可以使用`local`关键字声明局部变量，这样Lua环境可以在脚本执行结束之后，局部变量可以自动被回收， *Redis*通过下面这个函数，实现这个功能：
+
+```c
+void scriptingEnableGlobalsProtection(lua_State *lua);
+```
+
+
+
 #### Lua脚本之中的Redis接口
 前面我们介绍了，可以在Lua脚本代码段之中通过`redis.call`以及`redis.pcall`接口调用*Redis*的原生命令。除了上述两个接口之外，*Redis*还定义了若干个C语言接口共Lua脚本代码段之中进行调用。
 
@@ -241,17 +249,138 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error);
 
 #### Lua环境的初始化
 
-现在我们来看看，*Redis*是如何初始化一个Lua环境的
+现在我们来看看，*Redis*是如何初始化一个Lua环境的：
 
+1. *Redis*会在服务器通用的初始化函数`initServer`的最后，为服务器初始化Lua环境。
+2. 在执行`SCRIPT FLUSH`命令清空服务器上的Lua脚本缓存时，为了清空Lua环境之中可能残留的数据，也会对系统的Lua环境进行初始化。
 
+```c
+void scriptingInit(int setup);
+```
 
+通过`setup`参数，可以确定是对Lua环境的初始化是发生在系统启动时，还是通过`SCRIPT`进行的。`scriptingInit`这个初始话函数主要执行的逻辑为：
 
+1. *Redis*会同通过`lua_open`函数来创建一个新的Lua环境，并通过`luaLoadLibraries`为这个Lua环境加载脚本执行时必要的库；并通过`luaRemoveUnsupportedFunctions`来移除*Redis*不支持的Lua原生函数。
+2. 初始化*Redis*服务器全局变量中缓存脚本的哈希表`redisServer.lua_script`。
+3. 在禁止创建Lua全局变量之前，先为Lua环境创建一个全局的表`redis`，并将前面定义的C语言接口以及其他系统变量注册进这个全局表`redis`之中。例如将`luaRedisCallCommand`这个C语言进口注册进`redis`全局表，成为`redis.call`这个函数。
+4. `scriptingInit`会将Lua库函数之中一些具有副作用的函数替换成*Redis*自己实现的函数接口，需要被替换的函数有两个`math.random`以及`math.randomseed`这两个Lua库函数。
+5. 为执行Lua脚本之中的*Redis*原生命令，*Redis*需要初始化一个用于执行命令的伪客户端`redisServer.lua_client`。
+6. 最后*Redis*会通过`scriptingEnableGlobalsProtection`函数，来保护Lua环境，禁止后续用户在Lua脚本之中声明全局变量。
 
+#### 脚本命令的实现
 
+对于*Redis*原生的脚本命令之中，较为重要的便是通过**EVAL**来执行脚本的命令以及通过**SCRIPT**命令来杀掉出现Bug脚本这两个命令，本小节之中也着重对这两个部分进行介绍。
 
+```c
+void evalGenericCommand(client *c, int evalsha);
+```
 
+通过**EVAL**命令以及**EVALSHA**命令来执行Lua脚本代码的，下面我们来简要介绍一下`evalGenericCommand`这个函数的实现逻辑：
 
+1. 首先清空服务器全局变量之中关于Lua脚本的数据字段，包括`redisServer.lua_random_dirty`以及`redisServer.lua_write_dirty`等这样的字段，将系统之中的Lua环境的数据重置。
+2. 获取Lua脚本对应的SHA1哈希值，可以如果是**EVAL**命令，则是通过命令之中给定的脚本计算出来；如果是**EVALSHA**命令则从命令参数之中获取到脚本的哈希值。
+3. 查找脚本的哈希值对应的函数是否存在于Lua环境之中，如果不存在说明是通过**EVAL**命令执行的新的Lua脚本。对于这种情况则调用`luaCreateFunction`，将这个新的Lua脚本加入系统缓存之中。
+4. 将命令之中的`key`以及`arg`参数，写入Lua脚本的全局变量`KEYS`以及`ARGV`之中，供脚本的函数逻辑使用。
+5. 设置一些服务器关于Lua脚本执行的字段，包括当前执行脚本的客户端指针`redisServer.lua_caller`，脚本执行的开始时间`redisServer.lua_time_start`。如果系统设置了脚本执行时间的上限`redisServer.lua_time_limit`，那么会设置Lua的钩子`luaMaskCountHook`用于检测脚本执行是否超时。
+6. 通过`lua_pcall`来执行这个脚本函数。
+7. 通过`luaReplyToRedisReply`这个接口，将Lua环境之中的返回数据输出给客户端对象的应用层输出缓冲区。
 
+在了解了*Redis*如何通过**EVAL**以及**EVALSHA**命令执行Lua脚本之后，我们看看*Redis*服务器如何检测Lua脚本执行超时，并通过**SCRIPT**命令将超时的脚本杀掉的实现细节。
+
+首先*Redis*是通过`luaMaskCountHook`这个钩子来检测的：
+
+```c
+void luaMaskCountHook(lua_State *lua, lua_Debug *ar);
+```
+
+在`evalGenericCommand`函数之中的调用场景为：
+
+```c
+void evalGenericCommand(client *c, int evalsha)
+{
+    ...
+    if (server.lua_time_limit > 0 ldb.active == 0)
+    {
+        lua_sethook(lua, luaMaskCountHook, LUA_MASKCOUNT, 100000);
+        delhook = 1;
+    }
+    ...
+}
+```
+
+这里相当于Lua脚本每执行100000次执行单元就会调用`luaMaskCountHook`函数来检查脚本是否超时，
+
+```c
+void luaMaskCountHook(lua_State *lua, lua_Debug *ar)
+{
+    long long elapsed = mstime() - server.lua_time_start;
+    if (elapsed >= server.lua_time_limit && server.lua_timedout == 0)
+    {
+        server.lua_timedout = 1;
+        protectClient(server.lua_caller);
+    }
+    if (server.lua_timedout) processEventsWhileBlocked();
+    if (server.lua_kill) {
+        lua_error(lua);
+    }
+}
+```
+
+每次调用`luaMaskCountHook`这个函数时，都会检查从`redisServer.lua_time_start`这个时间戳开始，Lua脚本执行到现在是否超时，如果超时则会将`redisServer.lua_timedout`字段设置为1。当Lua脚本出现超时时，本质上是主线程卡死在`redisServer.lua_caller`这个客户端上来执行Lua脚本的流程上，此时如果不进行特殊的处理，*Redis*主线程将无法重新进入事件循环去处理其他的客户端发来的命令。因此*Redis*在检测到Lua脚本执行超时时，会调用`processEventsWhileBlocked`来强制*Redis*进入事件循环接收其他客户端的命令，这样其他客户端可以发送**SCRIPT**命令来终结这个超时脚本的执行。
+
+在*Redis*处理客户端命令的函数接口之中：
+
+```c
+int processCommand(client *c) {
+    ...
+    if (server.lua_timedout &&
+        c->cmd->proc != authCommand &&
+        c->cmd->proc != replconfCommand &&
+        !(c->cmd->proc == shutdownCommand &&
+          c->argc == 2 &&
+          tolower(((char*)c->argv[1]->ptr)[0]) == 'n') &&
+        !(c->cmd->proc == scriptCommand &&
+          c->argc == 2 &&
+          tolower(((char*)c->argv[1]->ptr)[0]) == 'k'))
+    {
+        flagTransaction(c);
+        addReply(c, shared.slowscripterr);
+        return C_OK;
+    }
+    ...
+}
+```
+
+上述代码之中，表明当Lua脚本执行超时时，仅允许客户端执行特定的几个命令，其中就包含了杀掉脚本运行的**SCRIPT**命令。
+
+最后我们来看一下**SCRIPT**命令是如何终止脚本运行的：
+
+```c
+void scriptCommand(client *c) {
+    ...
+    if (c->argc == 2 && !strcasecmp(c->argv[1]->ptr,"kill")) {
+    	 if (server.lua_caller == NULL) {
+             
+         } else if (server.lua_caller->flags & CLIENT_MASTER) {
+             
+         } else if (server.lua_write_dirty) {
+             
+         } else {
+          	server.lua_kill = 1;
+            addReply(c,shared.ok); 
+         }
+    }
+    ...
+}
+```
+
+这里会通过`redisServer.lua_caller`来检查当前是否运行者Lua脚本，通过`redisServer.lua_write_dirty`来检查脚本之中是否已经运行过写命令，同时检查这个当前运行Lua脚本的客户端是不是主从模式之中代表主服务器的客户端对象。在排除了上述这些检查之后，会将`redisServer.lua_kill`这个字段设置为1。
+
+回头再看`luaMaskCountHook`这个函数，当我们通过**SCRIPT**命令将`redisServer.lua_kill`字段设置为1之后，当脚本执行再次进入`luaMaskCountHook`这个函数后，会通过`lua_error`这个接口来终止脚本的运行。
+
+#### 脚本复制
+
+最后我们来看一下在主从模式之下，脚本的复制机制。
 
 
 ***
