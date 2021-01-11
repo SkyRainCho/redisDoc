@@ -127,6 +127,9 @@ struct redisServer {
     int lua_timeout;
     int lua_kill;
     int lua_always_replicate_comnands;
+    dict *repl_scriptcache_dict;
+    list *repl_scriptcache_fifo;
+    unisgned int repl_scriptcache_size;
 };
 ```
 这些数据字段之中：
@@ -145,6 +148,10 @@ struct redisServer {
 1. `redisServer.lua_timeout`，如果脚本执行的时间超过了`redisServer.lua_time_limit`设置的上限，那么这个字段会被设置为1。
 1. `redisServer.lua_kill`，如果脚本执行时间超时，其他用户可以执行`SCRIPT KILL`命令将这个字段设置为1，后续脚本会判断这个字段是否为1来决定是否终止脚本运行。
 1. `redisServer.lua_always_replicate_comnands`，
+1. `redisServer.repl_scriptcache_dict`，
+1. `redisServer.repl_scriptcache_fifo`，
+1. `redisServer.repl_scriptcache_size`，
+
 
 
 ### Redis脚本实现逻辑
@@ -380,8 +387,88 @@ void scriptCommand(client *c) {
 
 #### 脚本复制
 
-最后我们来看一下在主从模式之下，脚本的复制机制。
+最后我们来看一下脚本的复制机制，此处的复制可以理解为广义上的复制，其一是指主从模式下，命令从主服务器到从服务器上的复制功能；另外一种则是在执行**AOF**持久化的过程之中，将命令追加到**AOF**文件之中的功能。不过为了简化描述过程，此处将以主从复制为例，来介绍脚本的复制机制。而本节所讨论的脚本复制机制包含两个独立的内容，一个是脚本本身的复制，另外一个内容是对脚本之中单条命令的复制。
 
+##### 脚本本体复制
+
+这一部分比较容易理解，就是主服务器在客户端通过**EVAL**命令执行Lua脚本的时候，也会将这条命令转发从服务器并执行命令，以完成数据的同步。因为通过**EVAL**命令，Lua脚本代码段都是通过参数的形式显式地给出的，因此不需要做额外地处理。比较麻烦的是**EVALSHA**命令的复制机制，对于**EVALSHA**命令是通过**SHA1**哈希值来指定所要执行的Lua脚本内容，而这些被缓存的脚本都是存储在服务器全局变量`redisServer.lua_scripts`这个哈希表之中的。不过不幸的是，在主从服务器建立连接进行数据同步的时候，`redisServer.lua_scripts`这个哈希表并不在待同步数据的范围之内。因此如果直接转发**EVALSHA**命令到从服务器上的话，从服务器上很有可能并不存在给定**SHA1**哈希值对应的脚本。
+
+因此除非从服务器上已经缓存了指定的脚本代码，否则**EVALSHA**命令将会被转化为**EVAL**命令进行复制。为了确保这个功能的实现，*Redis*服务器在服务器全局数据结构之中定义了`redisServer.repl_scriptcache_dict`这个哈希表并将其做一个集合来使用。记录已经被从服务器缓存在Lua脚本代码，关于这部分数据，*Redis*给出了三个函数接口用于处理：
+```c
+void replicationScriptCacheAdd(sds sha1);
+int replicationScriptCacheExists(sds sha1);
+void replicationScriptCacheFlush(void);
+```
+这三个函数里：
+1. `replicationScriptCacheAdd`，当一个Lua脚本被传递给从服务器时，主服务器会通过这个函数接口，将这个脚本对应的**SHA1**哈希值加入`redisServer.repl_scriptcache_dict`这个集合中，用于记录。
+1. `replicationScriptCacheExists`，通过这个函数接口则可以判断，给定哈希值的的Lua代码是否已经传递给从服务器。
+1. `replicationScriptCacheFlush`，当有新的从服务器连接到当前的主服务器时，通过这个接口可以清空主服务器上`redisServer.repl_scriptcache_dict`这个缓存，以达到强制重新同步Lua脚本代码的目录。
+
+```c
+void evalGenericCommand(client *c, int evalsha) {
+    ...
+    if (evalsha && !server.lua_replicate_commands) {
+        if (!replicationScriptCacheExists(c->argv[1]->ptr)) {
+            robj *script = dictFetchValue(server.lua_scripts,c->argv[1]->ptr);
+            replicationScriptCacheAdd(c->argv[1]->ptr);
+            serverAssertWithInfo(c,NULL,script != NULL);
+            if (server.dirty == initial_server_dirty) {
+                rewriteClientCommandVector(c,3,resetRefCount(createStringObject("SCRIPT",6)),
+                                resetRefCount(createStringObject("LOAD",4)),script);
+            } else {
+                rewriteClientCommandArgument(c,0,resetRefCount(createStringObject("EVAL",4)));
+                rewriteClientCommandArgument(c,1,script);
+            }
+            forceCommandPropagation(c,PROPAGATE_REPL|PROPAGATE_AOF);
+        }
+    }
+    ...
+}
+```
+通过上面这个代码段，我们可以了解到*Redis*在执行**EVALSHA**命令时，关于复制机制的特殊处理：
+1. 通过`replicationScriptCacheExists`接口，检查参数中哈希值对应的脚本是否已经被从服务器缓存。
+1. 如果没有被从服务器缓存，那么先通过`replicationScriptCacheAdd`接口，将这个脚本加入到`redisServer.repl_scriptcache_dict`集合之中。
+1. 根据脚本的执行情况对命令进行强制修改：
+    1. 如果脚本之中全部为只读命令，那么只需要让从服务器缓存这个脚本就可以，不需要关心脚本的内在逻辑。因此**EVALSHA**命令则会强制被转化为**SCRIPT LOAD**命令传递给从服务器。
+    1. 如果脚本之中执行的*Redis*原生命令修改了数据库的键空间，那么需要将**EVALSHA**命令强制转化为**EVAL**命令传递给从服务器，让从服务器在缓存脚本代码的同时，执行脚本逻辑进行数据同步。
+
+##### 脚本命令复制
+在了解脚本命令的复制之前，首先我们来看两个*Redis*中Lua脚本的应用场景：
+1. 如果我们执行了一段非常复杂、非常耗时的脚本，但是这段脚本代码没有调用任何可写的*Redis*原生命令。换句话说，除了大量占用了系统资源之外，对*Redis*数据库键空间之中的数据本身没有任何影响。那么这样的代码是否有必要传递到从服务器上在重复执行一次呢？
+1. 如果在脚本之中执行了带有不确定性的命令，并且Lua脚本会根据这些不确定性命令的返回结果执行不同的逻辑。举个例子，脚本之中可以根据**TIME**命令返回的系统时间进行逻辑判断并执行不同的命令，如果这样的脚本被发送到从服务器上执行或者在服务器启动时从**AOF**文件之中解析并执行，那么很有可能这个脚本的执行逻辑并非是按照我们预期来进行的。对于这种情况，*Redis*需要如何处理呢？
+
+对于这种情况，*Redis*设计实现了脚本之中针对单独命令的复制功能，基于这种功能，我们可以选择性地对脚本之中的某些特定命令进行复制，而不是复制整个脚本本体，而最终的复制形式，是将这个脚本执行过程中的所有需要复制的命令通过**MULTI**以及**EXEC**这两个命令包装成一组事务命令进行复制，以保证命令执行的原子性。
+
+*Redis*会通过服务器全局变量之中的`redisServer.lua_replicate_commands`字段来判断是否开启了脚本中单独命令复制的功能。在Lua脚本之中，我们可以通过`redis.replicate_commands()`这个函数，进而调用C语言接口`luaRedisReplicateCommandsCommand`将`redisServer.lua_replicate_commands`以开启这个特殊的功能。
+
+如果这个功能开启，*Redis*则会根据`redisServer.lua_repl`这个变量上存储的标记对命令执行不同的复制逻辑，在Lua脚本之中我们可以通过`redis.set_repl(flags)`这个接口，来对这个标记进行调整。
+
+当我们期待某一个命令不要被复制，我们可以在`redis.call()`调用该原生命令之前，执行如下的Lua代码
+```lua
+redis.set_repl(redis.REPL_NONE)
+```
+
+当我们期待一条命令既能够被复制到从服务器，又能被追加到**AOF**文件之中时，我们可以在命令执行前，执行下面的Lua代码：
+```lua
+redis.set_repl(redis.REPL_ALL)
+```
+
+同理`redis.REPL_AOF`则表示后续的命令只会被追加到**AOF**文件之中；`redis.REPL_SLAVE`则表示后续命令只会被传递给从服务器上执行。
+
+同时，为了辅助单独命令的复制功能，*Redis*定义了一个变量`redisServer.lua_multi_emitted`，这个变量表示当前脚本是否已经提交了一个**MULTI**命令。其运行的逻辑为，如果当前Lua脚本开启了命令复制的功能，当遇到第一条需要复制的命令时，会先追加一条**MULTI**命令，用于开启这个脚本命令事务。在骄傲本执行结束之后，也会判断`redisServer.lua_multi_emitted`这个字段，如果为1则最后在追加一条**EXEC**命令，完成事务的命令序列，并将之追加到**AOF**文件之中或者传递给从服务器原子地执行命令序列。
+
+
+## 补充
+
+写在最后的一点，在写*Redis*上的Lua脚本时，我们不能通过`redis.call`来调用*Redis*原生命令之中那些具有阻塞功能的命令。之所以无法调用，这是与脚本功能的设计实现有关的。
+
+首先我们在来简述一下Lua脚本之中的执行过程，`redisServer.lua_caller`作为运行Lua脚本的真实客户端对象，对应用于一条与用户真实建立的连接。*Redis*执行脚本的过程与处理其他客户端的命令一样，主线程会处理`redisServer.lua_caller`这个客户端对象。而脚本之中调用的*Redis*原生命令，则是通过伪客户端对象`redisServer.lua_client`来进行的。
+
+而阻塞功能本质上是将阻塞的客户端设置成一个特殊的状态，在这个状态下，用户无法通过这个客户端对象执行其他的查询命令，仿佛这个客户端真的被挂起一下。而服务器并没有被阻塞，它会跳过这个客户端继续处理其他客户端的逻辑。
+
+如果我们在Lua脚本之中调用阻塞命令，那么实际上“阻塞”的是伪客户端对象`redisServer.lua_client`。脚本也不会阻塞在这条阻塞命令上，因为从服务器的角度上来看，阻塞相当与给客户端设置了阻塞状态之后立即返回。而真正脚本的调用者`redisServer.lua_caller`根本不知道`redisServer.lua_client`以及处于了阻塞状态，因为两个客户端本质上是两个独立的对象，仅仅是因为执行Lua脚本才将两个客户端暂时联系了起来。一旦脚本执行结束，两个客户端的联系就已经解除，即使`redisServer.lua_client`从阻塞状态之中解除，也无法将这个事件通知给真正的客户端`redisServer.lua_caller`。
+
+如果我们期待可以在类似的原子操作命令序列之中支持阻塞命令，后面将要介绍的*Redis*模块功能则可以满足类似的需求。
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
