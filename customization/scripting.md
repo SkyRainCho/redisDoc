@@ -1,22 +1,22 @@
 # Redis脚本
 
-我们知道在关系型数据库之中，存在一个存储过程的一个概念。由于关系型数据自身仅仅能够提供增删改查这种基础功能，无法执行复杂逻辑，而所谓存储过程是一种在数据库中存储复杂程序，以便外部程序调用的一种数据库对象。存储过程本质上时为了完成特定功能的SQL语句集，经过编译创建并保存在数据库之中，数据库的用户可以指定存储过程的名字并给定参数来调用执行，用以实现数据库SQL语言层面的代码封装与复用。
+我们知道在关系型数据库之中，存在一个**存储过程**的概念。由于关系型数据自身仅仅能够提供增删改查这种基础功能，无法执行复杂逻辑，而所谓**存储过程**是一种在数据库中存储复杂程序逻辑，以便外部程序调用的一种数据库对象。**存储过程**本质上是为了完成特定功能的SQL语句集，经过编译创建并保存在数据库之中，数据库的用户可以指定**存储过程的**名字并给定参数来调用执行，用以实现数据库SQL语言层面的代码封装与复用。
 
-*Redis*虽然不是关系型数据库，但是也为用户提供了类似存储过程的功能。这个功能的核心是*Redis*内部集成了一个Lua脚本的解释器，用户可以通过Lua脚本来原子地调用一条或者多条*Redis*命令，并且可以集成一定的用户自定义逻辑。
+*Redis*虽然不是关系型数据库，但是也为用户提供了类似**存储过程**的功能。这个功能的核心是*Redis*内部集成了一个Lua脚本的解释器，用户可以通过Lua脚本来原子地调用一条或者多条*Redis*原生命令，并且可以集成一定的用户自定义逻辑。
 
 ## Redis脚本概述
 
-除了执行Lua脚本之外，*Redis*可以通过**PIPELINE**以及事务功能来一次性地执行多条命令，那么这三种方式有什么区别呢？
+除了执行Lua脚本之外，*Redis*可以通过**PIPELINE**以及**事务**功能来一次性地执行多条命令，那么这三种方式有什么区别呢？
 
 首先，**PIPELINE**机制完全是客户端的行为，客户端一次性将多条命令发送至*Redis*服务器，这个机制完全得益于*Redis*服务器核心所使用的事件驱动处理逻辑。这种方式虽然可以一次性地执行多条*Redis*命令，但是却无法保证命令执行的原子性。这一点在前面介绍*Redis*客户端对象那一部分的文章之中有过介绍。
 
-事务功能，会在客户端执行**MULTI**命令时，将客户端对象设置成一个事务状态，后续用户通过客户端执行的命令都会被缓存起来，而不是立即执行；最后当用户通过客户端执行**EXEC**命令时，前面被缓存起来的命令会一次性地原子的执行。而事务功能中，命令的执行过程不会被其他客户端所打断，具备原子性。然而事务功能也有它的局限性，它只能简单地执行多条*Redis*的原生命令，却对逻辑进行自定义。例如，我们希望根据*Redis*数据之中的某个特定键中存储的数值的不同，后续执行不同的命令，这种场景事务功能则是爱莫能助，如果将这个逻辑放在客户端去执行，先通过**GET**命令获取某一个键的值，在根据值的不同向服务器发起不同的命令，而这样的话又无法保证逻辑的原子性。
+事务功能，会在客户端执行**MULTI**命令时，将客户端对象设置成一个事务状态，后续用户通过客户端执行的查询命令都会被缓存起来，而不是立即执行；最后当用户通过客户端执行**EXEC**命令时，前面被缓存起来的命令会一次性地、原子地执行。而事务功能中，命令的执行过程不会被其他客户端所打断，具备原子性。然而事务功能也有它的局限性，它只能简单地执行多条*Redis*的原生命令，无法实现自定义的查询逻辑。例如，我们希望根据*Redis*数据之中的某个特定键中存储的数值的不同，后续执行不同的查询命令，这种场景事务功能则是爱莫能助，如果将这个逻辑放在客户端去执行，先通过**GET**命令获取某一个键的值，在根据值的不同向服务器发起不同的命令，而这样的话又无法保证逻辑的原子性。
 
-而Lua脚本恰恰是为了解决上面的这个场景需求所设计的，用户可以向*Redis*服务器发送一段Lua脚本代码段，在代码段之中可以调用*Redis*命令并获得命令的返回值，同时我们还可以使用Lua脚本语法不同的逻辑执行不同的*Redis*命令。而在一段Lua代码段之中的所有Lua逻辑以及*Redis*命令的执行是原子性的，不会被其他客户端的命令所打断。
+而Lua脚本恰恰是为了解决上面的这个场景需求所设计的，用户可以向*Redis*服务器发送一段Lua脚本代码段，在代码段之中可以调用*Redis*原生命令并获得命令的返回值，同时我们还可以使用Lua脚本代码根据不同的逻辑执行不同的*Redis*命令。而在一段Lua代码段之中的所有Lua逻辑以及*Redis*命令的执行是原子性的，不会被其他客户端的命令所打断。
 
 ### EVAL与EVALSHA命令
 
-上述这两个命令是*Redis*中执行Lua脚本的入口，首先我们来看一下**EVAL**命令的格式：
+**EVAL**以及**EVALSHA**这两个命令是*Redis*中执行Lua脚本的入口，首先我们来看一下**EVAL**命令的格式：
 
 ```
 EVAL script numkeys key [key ...] arg [arg ...]
@@ -28,7 +28,7 @@ EVAL script numkeys key [key ...] arg [arg ...]
 EVAL "return redis.call('set', KEYS[1], ARGV[1])" 1 script:key script:value
 ```
 
-上述这条命令，相当于在*Redis*上执行一条**SET**命令，为`script:key`这个键设置`script:value`的值。
+例如上述这条命令，相当于在*Redis*上执行一条**SET**命令，为`script:key`这个键设置`script:value`的值。
 
 *Redis*服务器在服务器全局数据结构之中，维护了一个哈希表用于缓存用户通过**EVAL**命令提交的Lua脚本代码段。在这个哈希表之中，键为`f_<hex sha1 sum>`，这其中`<hex sha1 sum>`是通过Lua脚本代码段的字符串计算得出的；哈希表之中的值为Lua脚本代码段的字符串。
 
@@ -40,7 +40,7 @@ function f_<hex sha1 sum>()
 end
 ```
 
-这样相当于在*Redis*之中维护了一个`<hex sha1 sum> : lua code`的对应关系。通过这个对应关系其他的用户可以复用其他用户上传的Lua脚本代码段。而命令**EVALSHA**恰好是为完成这个需求的，这个命令的格式为：
+这样相当于在*Redis*之中维护了一个`<hex sha1 sum> : lua code`的对应关系。通过这个对应关系用户可以复用其他用户上传的Lua脚本代码段。而命令**EVALSHA**恰好是为完成这个需求的，这个命令的格式为：
 
 ```
 EVALSHA sha1 numkeys key [key ...] arg [arg ...]
@@ -50,12 +50,18 @@ EVALSHA sha1 numkeys key [key ...] arg [arg ...]
 
 在*Redis*服务器运行Lua脚本代码时，需要将*Redis*的数据类型作为参数传入Lua环境，在脚本代码结束时需要将Lua数据类型作为返回值返回给*Redis*服务器，下面这个表格便是*Redis*数据与Lua数据的对应转化关系：
 Reds
-| Redis 数据类型 | Lua 数据类型 | 含义 |
-| -------------- | ------------ | ---- |
-|                |              |      |
+| Redis 数据类型   | Lua 数据类型 | 含义                                                |
+| ---------------- | ------------ | --------------------------------------------------- |
+| Integer Reply    | Lua number   | *Redis*整数类型对应Lua数字类型                      |
+| Bulk Reply       | Lua string   | *Redis*块数据对应Lua字符串                          |
+| Multi-Bulk Reply | Lua table    | *Redis*多块数据对应Lua表类型                        |
+| Status Reply     | Lua table    | *Redis*状态数据对应`ok`域中包含状态信息的Lua表类型  |
+| Error Reply      | Lua table    | *Redis*错误数据对应`err`域中包含错误信息的Lua表类型 |
+| Nil bulk Reply   | Lua boolean  | *Redis*空块数据对应Lua布尔值`false`                 |
+| Integer Reply    | Lua boolean  | Lua布尔值`true`将会被转换为*Redis*整数类型`1`       |
 
 
-在*Redis*的原生命令之中一些命令属于带有不确定性的命令，例如**HKEYS**这样的命令，即使两个内容完全相同的散列对象，也会因为键值对插入的顺序不同而导致**HKYES**命令的返回结果不同。如果在Lua脚本之中调用这些带有不确定性的命令，*Reds*会通过一个辅助的函数对结果进行排序。这样可以保证，只要两个对象的数据集是一样的，
+另外在*Redis*的原生命令之中一些命令属于带有不确定性的命令，例如**HKEYS**这样的命令，即使两个内容完全相同的散列对象，也会因为键值对插入的顺序不同而导致**HKYES**命令的返回结果不同。如果在Lua脚本之中调用这些带有不确定性的命令，*Reds*会通过一个辅助的函数对结果进行排序。这样可以保证，只要两个对象的数据集是一样的，输出的结果也一定是一样的。
 
 ### SCRIPT命令
 
@@ -99,7 +105,7 @@ SCRIPT LOAD script
 SCRIPT KILL
 ```
 
-这个命令执行之后，执行这个脚本的客户端会从**EVAL**命令的阻塞状态中退出，并收到一个错误作为返回值。这个命令只会杀掉那些执行只读命令的Lua脚本，对于执行过写命令的脚本，`SCRIPT KILL`命令无法将其杀掉，对于这种情况，说明了*Redis*数据库内存中的数据已经被污染，唯一可行的方案就是将*Redis*服务器关掉，防止污染数据被写入磁盘，我们可以通过下面的这条命令来以不存盘的方式关闭*Redis*服务器：
+这个命令执行之后，执行这个脚本的客户端会从**EVAL**命令的阻塞状态中退出，并收到一个错误作为返回值。这个命令只会杀掉那些执行只读命令的Lua脚本。对于执行过写命令的脚本，`SCRIPT KILL`命令无法将其杀掉，对于这种情况，说明了*Redis*数据库内存中的数据已经被污染，唯一可行的方案就是将*Redis*服务器关掉，防止污染数据被写入磁盘，我们可以通过下面的这条命令来以不存盘的方式关闭*Redis*服务器：
 ```
 SHUTDOWN NOSAVE
 ```
@@ -142,17 +148,12 @@ struct redisServer {
 1. `redisServer.lua_time_start`，记录当前Lua脚本执行的启动时间戳。
 1. `redisServer.lua_write_dirty`，如果当前Lua脚本中执行的*Redis*命令修改了键空间之中的数据，这个字段会被设置为1。
 1. `redisServer.lua_random_dirty`，如果当前Lua脚本中执行的*Redis*命令是带有随机标记`CMD_RANDOM`，这个字段会被设置为1。
-1. `redisServer.lua_replicate_commands`，
-1. `redisServer.lua_multi_emmitted`，
-1. `redisServer.lua_repl`，
+1. `redisServer.lua_replicate_commands`，这是一个标记字段，标记当前的*Redis*是否会对Lua脚本之中的命令执行单一的复制功能，而不是将整个脚本赋值给`Slave`脚本。
+1. `redisServer.lua_repl`，当我们开启了Lua脚本之中单一命令的复制功能，那么这个字段用于标记当前的复制标记，以指定*Redis*对命令的复制行为。
 1. `redisServer.lua_timeout`，如果脚本执行的时间超过了`redisServer.lua_time_limit`设置的上限，那么这个字段会被设置为1。
 1. `redisServer.lua_kill`，如果脚本执行时间超时，其他用户可以执行`SCRIPT KILL`命令将这个字段设置为1，后续脚本会判断这个字段是否为1来决定是否终止脚本运行。
-1. `redisServer.lua_always_replicate_comnands`，
-1. `redisServer.repl_scriptcache_dict`，
-1. `redisServer.repl_scriptcache_fifo`，
-1. `redisServer.repl_scriptcache_size`，
-
-
+1. `redisServer.lua_always_replicate_commands`，系统配置字段，默认*Redis*会将整个Lua脚本代码复制给`Slave`从节点。
+1. `redisServer.repl_scriptcache_dict`，作为一个集合使用，记录某个`sha1`的哈希值所对应的Lua脚本，是否已经被复制给`slave`从节点。
 
 ### Redis脚本实现逻辑
 
@@ -162,7 +163,7 @@ void sha1hex(char *digest, char *script, size_t len);
 ```
 脚本的哈希值可以通过`digest`参数进行返回。
 
-下面我们按照不同的功能分组，来看一下代码的实现逻辑。
+下面我们按照不同的功能分组，来看一下Luau脚本的代码实现逻辑。
 
 #### Redis与Lua的数据转换
 
@@ -178,7 +179,7 @@ char *redisProtocolToLuaType_Status(lua_State *lua, char *reply);
 char *redisProtocolToLuaType_Error(lua_State *lua, char *reply);
 char *redisProtocolToLuaType_MultiBulk(lua_State *lua, char *reply)
 ```
-这些函数的名字明显地指明了这些函数的功能，分别用于将`reply`数据之中的整数、块数据、状态信息、错误信息，多块数据压入到Lua的虚拟栈之中，这里需要注意如下内容：
+这些函数的名字显式地指明了这些函数的功能，分别用于将`reply`数据之中的整数、块数据、状态信息、错误信息，多块数据压入到Lua的虚拟栈之中，这里需要注意如下内容：
 1. `redisProtocolToLuaType_Bulk`这个函数中，如果块数据为空，那么会调用`lua_pushboolean`向虚拟栈中压入一个`false`值；否则调用`lua_pushstring`函数将块数据作为Lua字符串压入Lua虚拟栈。
 1. `redisProtocolToLuaType_Status`以及`redisProtocolToLuaType_Error`这两个函数，都会向Lua虚拟栈之中压入一个Lua的表数据，并向这个表中插入域值对`["ok"] = status`或者`["err"] = error_message`。
 
@@ -210,19 +211,18 @@ void luaSortArray(lua_State *lua);
 ```
 `luaSortArray`这个函数会通过Lua语言之中的`table.sort`接口，对Lua虚拟栈之中的命令返回数据进行排序，使之有序。
 
-Lua语言之中的一些全局函数例如`loadfile`，*Redis*不希望能在脚本之中能够被使用，因此通过`luaRemoveUnsupportedFunctions`接口将这些函数从Lua环境之中移除。
+在Lua语言之中的一些全局函数例如`loadfile`，*Redis*不希望能在脚本之中能够被使用，因此通过`luaRemoveUnsupportedFunctions`接口将这些函数从Lua环境之中移除。
+
 ```c
 void luaRemoveUnsupportedFunctions(lua_State *lua);
 ```
-这个函数会通过将指定的Lua全局函数的函数名设置为`nil`，来从Lua环境之中将这些函数移除的。
+这个函数会通过将指定的Lua全局函数的函数名设置为`nil`，从而在Lua环境之中将这些函数移除。
 
-同时，为了防止数据的残留，*Redis*禁止在Lua脚本之中声明任何全局变量；但是可以使用`local`关键字声明局部变量，这样Lua环境可以在脚本执行结束之后，局部变量可以自动被回收， *Redis*通过下面这个函数，实现这个功能：
+同时，为了防止数据的残留，*Redis*禁止在Lua脚本之中声明任何全局变量；不过我们可以使用`local`关键字声明局部变量，这样Lua环境可以在脚本执行结束之后，局部变量可以自动被回收， *Redis*通过下面这个函数，实现这个功能：
 
 ```c
 void scriptingEnableGlobalsProtection(lua_State *lua);
 ```
-
-
 
 #### Lua脚本之中的Redis接口
 前面我们介绍了，可以在Lua脚本代码段之中通过`redis.call`以及`redis.pcall`接口调用*Redis*的原生命令。除了上述两个接口之外，*Redis*还定义了若干个C语言接口共Lua脚本代码段之中进行调用。
@@ -235,7 +235,7 @@ void scriptingEnableGlobalsProtection(lua_State *lua);
 |`int luaRedisErrorReplyCommand(lua_State *lua)`|`redis.error_reply`|在Lua代码中，向Lua虚拟栈压入错误信息|
 |`int luaRedisStatusReplyCommand(lua_State *lua)`|`redis.status_reply`|在Lua代码中，向Lua虚拟栈压入状态信息|
 |`int luaRedisReplicateCommandsCommand(lua_State *lua)`|`redis.replicate_commands`|如果截止这个接口前，脚本没有执行过写命令的话，这个接口可以开启单一命令的复制并返回`true`；否则这个接口会返回`false`，并继续坚持整个脚本的复制工作。|
-|`int luaRedisSetReplCommand(lua_State *lua)`|`redis.set_repl`||
+|`int luaRedisSetReplCommand(lua_State *lua)`|`redis.set_repl`|用于设置当前脚本之中命令复制的标记。|
 |`int luaLogCommand(lua_State *lua)`|`redis.log`|通过这个接口可以向*Redis*服务器的日志系统之中添加日志|
 
 在上述这些函数接口之中，比较重要的是在Lua脚本代码段之中，通过`redis.call`以及`redis.pcall`来调用*Redis*原生命令的接口，这两个接口都是通过下面这个函数来实现的：
@@ -391,16 +391,16 @@ void scriptCommand(client *c) {
 
 ##### 脚本本体复制
 
-这一部分比较容易理解，就是主服务器在客户端通过**EVAL**命令执行Lua脚本的时候，也会将这条命令转发从服务器并执行命令，以完成数据的同步。因为通过**EVAL**命令，Lua脚本代码段都是通过参数的形式显式地给出的，因此不需要做额外地处理。比较麻烦的是**EVALSHA**命令的复制机制，对于**EVALSHA**命令是通过**SHA1**哈希值来指定所要执行的Lua脚本内容，而这些被缓存的脚本都是存储在服务器全局变量`redisServer.lua_scripts`这个哈希表之中的。不过不幸的是，在主从服务器建立连接进行数据同步的时候，`redisServer.lua_scripts`这个哈希表并不在待同步数据的范围之内。因此如果直接转发**EVALSHA**命令到从服务器上的话，从服务器上很有可能并不存在给定**SHA1**哈希值对应的脚本。
+这一部分比较容易理解，就是主服务器在客户端通过**EVAL**命令执行Lua脚本的时候，也会将这条命令转发给从服务器并执行命令，以完成数据的同步。因为通过**EVAL**命令，Lua脚本代码段都是通过参数的形式显式地给出的，因此不需要做额外地处理。比较麻烦的是**EVALSHA**命令的复制机制，对于**EVALSHA**命令是通过**SHA1**哈希值来指定所要执行的Lua脚本内容，而这些被缓存的脚本都是存储在服务器全局变量`redisServer.lua_scripts`这个哈希表之中的。不过不幸的是，在主从服务器建立连接进行全量的数据同步时，`redisServer.lua_scripts`这个哈希表并不在待同步数据的范围之内。因此如果直接转发**EVALSHA**命令到从服务器上的话，从服务器上很有可能并不存在给定**SHA1**哈希值对应的脚本。
 
-因此除非从服务器上已经缓存了指定的脚本代码，否则**EVALSHA**命令将会被转化为**EVAL**命令进行复制。为了确保这个功能的实现，*Redis*服务器在服务器全局数据结构之中定义了`redisServer.repl_scriptcache_dict`这个哈希表并将其做一个集合来使用。记录已经被从服务器缓存在Lua脚本代码，关于这部分数据，*Redis*给出了三个函数接口用于处理：
+因此除非从服务器上已经缓存了指定的脚本代码，否则**EVALSHA**命令将会被转化为**EVAL**命令进行复制。为了确保这个功能的实现，*Redis*服务器在服务器全局数据结构之中定义了`redisServer.repl_scriptcache_dict`这个哈希表并将其做一个集合来使用。记录已经被从服务器缓存的Lua脚本代码，关于这部分数据，*Redis*给出了三个函数接口用于处理：
 ```c
 void replicationScriptCacheAdd(sds sha1);
 int replicationScriptCacheExists(sds sha1);
 void replicationScriptCacheFlush(void);
 ```
 这三个函数里：
-1. `replicationScriptCacheAdd`，当一个Lua脚本被传递给从服务器时，主服务器会通过这个函数接口，将这个脚本对应的**SHA1**哈希值加入`redisServer.repl_scriptcache_dict`这个集合中，用于记录。
+1. `replicationScriptCacheAdd`，当一个Lua脚本被传递给从服务器时，主服务器会通过这个函数接口，将这个脚本对应的**SHA1**哈希值加入主服务器的`redisServer.repl_scriptcache_dict`这个集合中，用于表示这个脚本已经被从服务器所缓存。
 1. `replicationScriptCacheExists`，通过这个函数接口则可以判断，给定哈希值的的Lua代码是否已经传递给从服务器。
 1. `replicationScriptCacheFlush`，当有新的从服务器连接到当前的主服务器时，通过这个接口可以清空主服务器上`redisServer.repl_scriptcache_dict`这个缓存，以达到强制重新同步Lua脚本代码的目录。
 
@@ -428,18 +428,18 @@ void evalGenericCommand(client *c, int evalsha) {
 通过上面这个代码段，我们可以了解到*Redis*在执行**EVALSHA**命令时，关于复制机制的特殊处理：
 1. 通过`replicationScriptCacheExists`接口，检查参数中哈希值对应的脚本是否已经被从服务器缓存。
 1. 如果没有被从服务器缓存，那么先通过`replicationScriptCacheAdd`接口，将这个脚本加入到`redisServer.repl_scriptcache_dict`集合之中。
-1. 根据脚本的执行情况对命令进行强制修改：
-    1. 如果脚本之中全部为只读命令，那么只需要让从服务器缓存这个脚本就可以，不需要关心脚本的内在逻辑。因此**EVALSHA**命令则会强制被转化为**SCRIPT LOAD**命令传递给从服务器。
+1. 根据Lua脚本的代码逻辑对**EVALSHA**命令进行强制修改：
+    1. 如果脚本之中全部为只读命令，那么只需要让从服务器缓存这个脚本就可以，不需要在从服务器上执行Lua脚本的内部逻辑。因此**EVALSHA**命令则会强制被转化为**SCRIPT LOAD**命令传递给从服务器。
     1. 如果脚本之中执行的*Redis*原生命令修改了数据库的键空间，那么需要将**EVALSHA**命令强制转化为**EVAL**命令传递给从服务器，让从服务器在缓存脚本代码的同时，执行脚本逻辑进行数据同步。
 
 ##### 脚本命令复制
 在了解脚本命令的复制之前，首先我们来看两个*Redis*中Lua脚本的应用场景：
-1. 如果我们执行了一段非常复杂、非常耗时的脚本，但是这段脚本代码没有调用任何可写的*Redis*原生命令。换句话说，除了大量占用了系统资源之外，对*Redis*数据库键空间之中的数据本身没有任何影响。那么这样的代码是否有必要传递到从服务器上在重复执行一次呢？
-1. 如果在脚本之中执行了带有不确定性的命令，并且Lua脚本会根据这些不确定性命令的返回结果执行不同的逻辑。举个例子，脚本之中可以根据**TIME**命令返回的系统时间进行逻辑判断并执行不同的命令，如果这样的脚本被发送到从服务器上执行或者在服务器启动时从**AOF**文件之中解析并执行，那么很有可能这个脚本的执行逻辑并非是按照我们预期来进行的。对于这种情况，*Redis*需要如何处理呢？
+1. 如果我们执行了一段非常复杂、非常耗时的Lua脚本，但是这段脚本代码中没有调用任何可写的*Redis*原生命令。换句话说，除了大量占用了系统资源之外，对*Redis*数据库键空间之中的数据本身没有任何影响。那么这样的代码是否有必要传递到从服务器上在重复执行一次呢？
+1. 如果在脚本之中执行了带有不确定性的命令，并且Lua脚本会根据这些不确定性命令的返回结果执行不同的逻辑。举个例子，脚本之中可以根据**TIME**命令返回的系统时间进行逻辑判断并执行不同的命令，如果这样的脚本被发送到从服务器上执行或者在服务器启动时从**AOF**文件之中解析并重执行，那么很有可能这个脚本的执行逻辑并非是按照我们预期来进行的。对于这种情况，*Redis*需要如何处理呢？
 
-对于这种情况，*Redis*设计实现了脚本之中针对单独命令的复制功能，基于这种功能，我们可以选择性地对脚本之中的某些特定命令进行复制，而不是复制整个脚本本体，而最终的复制形式，是将这个脚本执行过程中的所有需要复制的命令通过**MULTI**以及**EXEC**这两个命令包装成一组事务命令进行复制，以保证命令执行的原子性。
+对于上述的情况，*Redis*设计实现了脚本之中针对单独命令的复制功能，基于这种功能，我们可以选择性地对脚本之中的某些特定命令进行复制，而不是复制整个脚本本体，而最终的复制形式，是将这个脚本执行过程中的所有需要复制的命令通过**MULTI**以及**EXEC**这两个命令包装成一组事务命令进行复制，以保证命令执行的原子性。
 
-*Redis*会通过服务器全局变量之中的`redisServer.lua_replicate_commands`字段来判断是否开启了脚本中单独命令复制的功能。在Lua脚本之中，我们可以通过`redis.replicate_commands()`这个函数，进而调用C语言接口`luaRedisReplicateCommandsCommand`将`redisServer.lua_replicate_commands`以开启这个特殊的功能。
+*Redis*会通过服务器全局变量之中的`redisServer.lua_replicate_commands`字段来判断是否开启了脚本中单独命令复制的功能。在Lua脚本之中，我们可以通过`redis.replicate_commands()`这个函数，进而调用C语言接口`luaRedisReplicateCommandsCommand`将`redisServer.lua_replicate_commands`设置为1，以开启这个特殊的功能。
 
 如果这个功能开启，*Redis*则会根据`redisServer.lua_repl`这个变量上存储的标记对命令执行不同的复制逻辑，在Lua脚本之中我们可以通过`redis.set_repl(flags)`这个接口，来对这个标记进行调整。
 
@@ -455,20 +455,20 @@ redis.set_repl(redis.REPL_ALL)
 
 同理`redis.REPL_AOF`则表示后续的命令只会被追加到**AOF**文件之中；`redis.REPL_SLAVE`则表示后续命令只会被传递给从服务器上执行。
 
-同时，为了辅助单独命令的复制功能，*Redis*定义了一个变量`redisServer.lua_multi_emitted`，这个变量表示当前脚本是否已经提交了一个**MULTI**命令。其运行的逻辑为，如果当前Lua脚本开启了命令复制的功能，当遇到第一条需要复制的命令时，会先追加一条**MULTI**命令，用于开启这个脚本命令事务。在骄傲本执行结束之后，也会判断`redisServer.lua_multi_emitted`这个字段，如果为1则最后在追加一条**EXEC**命令，完成事务的命令序列，并将之追加到**AOF**文件之中或者传递给从服务器原子地执行命令序列。
+同时，为了辅助单独命令的复制功能，*Redis*定义了一个变量`redisServer.lua_multi_emitted`，这个变量表示当前脚本是否已经提交了一个**MULTI**命令。其运行的逻辑为，如果当前Lua脚本开启了命令复制的功能，当遇到第一条需要复制的命令时，会先追加一条**MULTI**命令，用于开启这个脚本命令事务。在脚本执行结束之后，也会判断`redisServer.lua_multi_emitted`这个字段，如果为1则最后在追加一条**EXEC**命令，完成事务的命令序列，并将之追加到**AOF**文件之中或者传递给从服务器原子地执行命令序列。
 
 
 ## 补充
 
-写在最后的一点，在写*Redis*上的Lua脚本时，我们不能通过`redis.call`来调用*Redis*原生命令之中那些具有阻塞功能的命令。之所以无法调用，这是与脚本功能的设计实现有关的。
+写在最后的一点，在编辑*Redis*上运行的Lua脚本时，我们不能通过`redis.call`来调用*Redis*原生命令之中那些具有阻塞功能的命令。之所以无法调用，这是与脚本功能的设计实现有关的。
 
 首先我们在来简述一下Lua脚本之中的执行过程，`redisServer.lua_caller`作为运行Lua脚本的真实客户端对象，对应用于一条与用户真实建立的连接。*Redis*执行脚本的过程与处理其他客户端的命令一样，主线程会处理`redisServer.lua_caller`这个客户端对象。而脚本之中调用的*Redis*原生命令，则是通过伪客户端对象`redisServer.lua_client`来进行的。
 
 而阻塞功能本质上是将阻塞的客户端设置成一个特殊的状态，在这个状态下，用户无法通过这个客户端对象执行其他的查询命令，仿佛这个客户端真的被挂起一下。而服务器并没有被阻塞，它会跳过这个客户端继续处理其他客户端的逻辑。
 
-如果我们在Lua脚本之中调用阻塞命令，那么实际上“阻塞”的是伪客户端对象`redisServer.lua_client`。脚本也不会阻塞在这条阻塞命令上，因为从服务器的角度上来看，阻塞相当与给客户端设置了阻塞状态之后立即返回。而真正脚本的调用者`redisServer.lua_caller`根本不知道`redisServer.lua_client`以及处于了阻塞状态，因为两个客户端本质上是两个独立的对象，仅仅是因为执行Lua脚本才将两个客户端暂时联系了起来。一旦脚本执行结束，两个客户端的联系就已经解除，即使`redisServer.lua_client`从阻塞状态之中解除，也无法将这个事件通知给真正的客户端`redisServer.lua_caller`。
+如果我们在Lua脚本之中调用阻塞命令，那么实际上“阻塞”的是伪客户端对象`redisServer.lua_client`。脚本也不会阻塞在这条阻塞命令上，因为从服务器的角度上来看，阻塞相当与给客户端设置了阻塞状态之后立即返回。而真正脚本的调用者`redisServer.lua_caller`根本不知道`redisServer.lua_client`是否处于了阻塞状态，因为两个客户端本质上是两个独立的对象，仅仅是因为执行Lua脚本才将两个客户端暂时联系了起来。一旦脚本执行结束，两个客户端对象之间的联系就已经解除，这样即使`redisServer.lua_client`从阻塞状态之中解除，也无法将这个事件通知给真正的客户端`redisServer.lua_caller`。
 
-如果我们期待可以在类似的原子操作命令序列之中支持阻塞命令，后面将要介绍的*Redis*模块功能则可以满足类似的需求。
+如果我们期待可以在类似的原子操作命令序列之中支持阻塞命令，后面将要介绍的*Redis*模块功能则可以满足这样的需求。
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
