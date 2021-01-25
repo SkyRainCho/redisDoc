@@ -147,12 +147,19 @@ while(redisGetReply(context,&reply) == REDIS_OK) {
 
 当一次函数调用没有执行成功，那么`redisContext.err`字段将会被设置成一个非零的错误码，用于标记错误信息：
 - **`REDIS_ERR_IO`**：
+
     **I/O**错误发生在创建连接，尝试调用`write`系统调用向连接之中写数据，或者调用`read`系统调用从连接之中读取数据时。如果我们在代码之中包含了`errno.h`头文件，那么我们可以通过`errno`这个全局变量来查找出错误原因。
+
 - **`REDIS_ERR_EOF`**：
+
     当`read`系统调用返回空数据的时候，意味着服务器一段关闭了网络连接。
+
 - **`REDIS_ERR_PROTOCOL`**：
+
     在解析协议数据时出错
+
 - **`REDIS_ERR_OTHER`**：
+
     任何可能出现的其他错误，现在唯一被用到的场景便是连接一个指定的域名，地址却无法被解析。
 
 当`redisContext.err`字段之中，出现了上述的错误码之后，`redisContext.errstr`字段相应地将会存储对应错误描述字符串。
