@@ -185,9 +185,83 @@ void redisFree(redisContext *c);
 |`int redisSetTcpNoDelay(redisContext *c)`|关闭`redisContext`对象连接上的**Nagle**设置|
 |`int redisContextTimeoutMsec(redisContext *c, long *result)`|获取`redisContext`对象上设置的超时间事件毫秒数|
 
-除了上面这些基础的静态函数接口之外，*deps/hiredis/net.c*源文件之中还定义了两个比较重要的静态函数接口
-### 命令格式化与发送
+除了上面这些基础的静态函数接口之外，*deps/hiredis/net.c*源文件之中还定义了两个比较重要的静态函数接口，
+首先是等待连接就绪的函数接口：
+```c
+int redisContextWaitReady(redisContext *c, long msec)
+{
+    struct pollfd wfd[1];
+    wfd[0].fd = c->fd;
+    wfd[0].events = POLLOUT;
 
+    if (errno == EINPROGRESS)
+    {
+        int res;
+        if ((res = poll(wfd, 1, msec) == -1))
+        {
+            ...
+        }
+        ...
+        return REDIS_OK;
+    }
+    return REDIS_ERR;
+}
+```
+这个函数的主要用途便是调用`poll`系统调用等待`redisContext`连接上的可写事件，正如我们在前面介绍*Redis*底层API的时候曾经讲解过的非阻塞`connect`操作。Hiredis库之中，客户端调用API向服务器发起连接都是采用非阻塞地`connect`，因此我们需要一个接口来检查连接上是否触发了可写事件。`redisContextWaitReady`这个接口便是为了这个目的而实现的，如果`redisContextWaitReady`函数从`poll`系统调用的阻塞之中返回，且没有返回错误，那么说明与服务器之间的网络连接已经完全建立；否则便说明连接建立失败。
+
+另外一个接口便是客户端主动向服务器发起连接的函数：
+```c
+int _redisContextConnectTcp(redisContext *c, const char *addr, int port, const struct timeval *timeout, const char *source_addr)
+{
+    int blocking = (c->flags & REDIS_BLOCK);
+    ...
+    s = socket(p->ai_family,p->ai_socktype,p->ai_protocol);
+    c->fd = s;
+    redisSetBlocking(c,0);
+    if (connect(s,p->ai_addr,p->ai_addrlen) == -1) {
+        ...
+        else if (errno == EINPROGRESS && !blocking) {
+
+        }
+        ...
+        else
+        {
+            if (redisContextWaitReady(c,timeout_msec) != REDIS_OK)
+                goto error;
+        }
+    }
+    if (blocking && redisSetBlocking(c,1) != REDIS_OK)
+        goto error;
+}
+```
+通过上面这个代码片段，我们可以发现不论`redisContext.flags`字段上是否携带了`REDIS_BLOCK`标记，客户端与服务器之间建立连接的过程都是采用非阻塞`connect`的调用来进行的，唯一区别在于同步的API在非阻塞`connect`之后，会通过`redisContextWaitReady`接口阻塞地等待连接建立；而在异步API之中，则不会通过`redisContextWaitReady`函数接口等待连接建立，取而代之的会将这个`redisContext`对象加入事件循环之中，通过回调函数来建立连接。
+
+在*deps/hiredis/hiredis.h*以及*deps/hiredis/hiredis.c*这两个文件之中，定义了多干个用于发起连接的API：
+```c
+redisContext *redisConnect(const char *ip, int port);
+redisContext *redisConnectWithTimeout(const char *ip, int port, const struct timeval tv);
+redisContext *redisConnectNonBlock(const char *ip, int port);
+redisContext *redisConnectBindNonBlock(const char *ip, int port, const char *source_addr);
+redisContext *redisConnectBindNonBlockWithReuse(const char *ip, int port, const char *source_addr);
+```
+在这几个API之中`redisConnect`以及`redisConnectWithTimeout`用于在同步API之中发起连接，而另外三个API则是用于在异步API之中向服务器发起连接。
+
+### 命令格式化与发送
+Hiredis库对于查询命令的格式化以及发送的相关逻辑代码主要定义在*deps/hiredis/hiredis.h*以及*deps/hiredis/hiredis.c*这两个代码文件之中。
+
+在`redisContext`这个结构体之中，`redisContext.obuf`字段代表着这个连接所对应的应用层输出缓冲区，所有的查询命令都会首先被写入这个输出缓冲区，然后再通过`write`系统调用写入网络。Hiredis给出了一组用于对输出命令进行格式化的函数接口，这组接口会按照*Redis*的协议格式对客户端给出的查询命令数据进行格式化：
+```c
+int redisvFormatCommand(char **target, const char *format, va_list ap);
+int redisFormatCommand(char **target, const char *format, ...);
+int redisFormatCommandArgv(char **target, int argc, const char **argv, const size_t *argvlen);
+int redisFormatSdsCommandArgv(sds *target, int argc, const char ** argv, const size_t *argvlen);
+```
+而客户端对于流水线机制的支持，便都是借用上面的这些函数接口，将格式化后的查询命令数据写入到应用层缓冲区`redisContext.obuf`之中的。
+
+而真正地将输出缓冲区之中的数据发送出去则是通过下面这个接口来实现的：
+```c
+int redisBufferWrite(redisContext *c, int *done);
+```
 ### 返回数据解析
 
 
