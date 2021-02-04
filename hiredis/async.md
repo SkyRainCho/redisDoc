@@ -1,7 +1,7 @@
 # Redis客户端异步API
 
 ## 异步API概述
-Hiredis之中提供了一组异步API，可以很容易的配合各种事件库进行工作。在*deps/hiredis/examples*目录下，提供了两个例子，展示了Hiredis是如何于libev库以及libevent库配合工作的。
+Hiredis之中提供了一组异步API，可以很容易的配合各种事件库进行工作。在*deps/hiredis/examples*目录下，提供了两个例子，展示了Hiredis是如何于libev库以及libevent库配合工作的。本小节内容翻译自Hiredis官方文档。
 
 ### 建立连接
 使用`redisAsyncConnect`函数，可以建立一条与*Redis*服务器之间的非阻塞的网络连接。这个函数会返回一个新被创建`redisAsyncContext`对象指针。获取到这个`redisAsyncContexr`对象指针指针之后，我们需要检查`redisAsyncContext.err`字段上的数据，以判断在创建连接的过程之中是否有报错信息。之所以需要检查`err`字段，是因为将要创建的连接使用的是非阻塞模式，如果给定的地址与端口可以接受连接，内核是无法立即地将连接返回的。
@@ -58,6 +58,83 @@ void redisAsyncDisconnect(redisAsyncContext *ac);
 
 ### 异步API挂载事件库
 在*deps/hiredis/adapters*目录下，定义了若干的钩子，用于在`redisAsyncContext`对象被创建之后，挂载到事件库上。
+
+## 异步API的实现细节
+
+### 异步API的数据结构定义
+在*deps/hiredis/async.h*头文件之中定义了关于异步API使用的`redisAsyncContext`数据结构。与同步API类似，`redisAsyncContext`表示用户与*Redis*服务器之间的连接。
+```c
+typedef struct redisAsyncContext 
+{
+    redisContext c;
+    int err;
+    char *errstr;
+    void *data;
+    struct {
+        void *data;
+        void (*addRead)(void *privdata);
+        void (*delRead)(void *privdata);
+        void (*addWrite)(void *privdata);
+        void (*delWrite)(void *privdata);
+        void (*cleanup)(void *privdata);
+    } ev;
+
+    redisDisConnectCallback *onDisConnect;
+    redisConnectCallback *onConnect;
+
+    redisCallbackList replies;
+
+    struct {
+        redisCCallbackList invalid;
+        struct dict *channels;
+        struct dict *patterns;
+    } sub;
+} redisAsyncContext;
+```
+在`redisAsyncContext`这个数据接口之中：
+- `redisAsyncContext.c`，这个字段是一个`redisContext`类型的数据，用于实际地记录用户与*Redis*服务器之间的连接信息。
+- `redisAsyncContext.err`与`redisAsyncContext.errstr`，当连接或者对于`redisAsyncContext`对象数据的操作出现错误时，这两个字段存储了对应的错误信息。而实际上这两个字段是从`redisAsyncContext.c`这个`redisContext`类型数据中的`redisContext.err`以及`redisContext.errstr`字段之中复制过来的。
+- `redisAsyncContext.ev`，这个字段是`redisAsyncContext`对象与事件驱动库交互的接口，需要Hiredis的用户按照声明的函数原型自行定义相关接口函数的实现，并赋值给`redisAsyncContext.ev`这个字段。
+- `redisAsyncContext.onDisConnect`，`redisAsyncContext`对象在连接断开时的回调函数。
+- `redisAsyncContext.onConnect`，由于`redisAyncContext`对象建立连接时也是采用异步的方式建立的，而这个字段存储的便是连接被真正建立起来时，需要调用的回调函数。
+- `redisAsyncContext.replies`，这里以单链表的形式存储着查询命令返回数据的回调函数，由于*Redis*服务器在处理核心数据的时候，采用的是单线程的方式进行处理，因此用户执行的查询命令都是按照顺序执行的，而`redisAsyncContext.replies`字段之中也是按照先进先出的顺序存储查询命令对应的回调函数的。
+- `redisAsyncContext.sub`，这里存储在**订阅/发布**模式下的消息回调函数。对于普通的查询命令，无论执行成功与否，都是一条查询命令对应一个返回数据的形式；而在**订阅/发布**模式中，在执行过订阅命令后，可能回收到多条返回消息，也就是对一个频道或者模式的订阅命令对应多个返回数据的一对多的形式。因此异步API之中采用了`redisAsyncContext.sub`这个字段独立存储**订阅/发布**模式下的消息回调函数。
+
+对于`redisAsyncContext.onDisConnect`以及`redisAsyncContext.onConnect`这两个函数指针对应的回调函数，需要Hiredis库的使用者自行定义，不过函数的定义应该遵循下面的函数原型：
+```c
+void(const redisAsyncContext *c, int status);
+```
+这两个回调函数应该根据`status`参数的值来判断连接是否正常建立，或者说导致连接断开的具体的原因，并作出相应的处理。
+
+而对于前面介绍的回调函数队列`redisAsyncContext.replies`，其数据结构的定义为：
+```c
+typedef void (redisCallbackFn)(struct redisAsyncContext*, void*, void*);
+typedef struct redisCallback {
+    struct redisCallback *next;
+    redisCallbackFn *fn;
+    void *privdata;
+} redisCallback;
+
+typedef struct redisCallbackList {
+    redisCallback *head, *tail;
+} redisCallbackList;
+```
+这里面`redisCallbackFn`为查询命令返回数据所触发的回调函数，Hiredis库的用户可以按照自己的需求为查询命令定义自己的回调函数，以处理查询命令的返回数据，回调函数应该接收一个`redisAsyncContext`对象、一个`redisReply`对象以及一个用户自定义的数据`privdata`做为参数。
+
+`redisCallbackList`这个单链表中按照顺寻存储了查询命令的回调数据`redisCallback`。`redisCallback`对象包含了对应的回调函数，以及用户自定义的数据`privdata`。
+
+### 异步API接口与事件驱动库的绑定
+Hiredis异步API的高效之处就在，用户通过异步API执行查询命令之后，不需要原地阻塞地等待服务器的返回数据。用户在执行完查询命令之后，可以继续去处理其他的业务逻辑，在查询命令的返回数据就绪之后，Hiredis在通知用户读取数据，通过回调函数来处理返回数据。而这种通知的机制就是整个异步API的核心，事件驱动库主要的工作便是执行上述的通知机制。在前面的文章之中我们介绍了*Redis*服务器所使用的自己实现的事件驱动库，相信各位读者对事件驱动库的核心概念已经有了一个了解。
+
+除了*Redis*服务器自身实现的事件驱动库之外，业内比较流行开源的事件驱动库包括**Libevent**、**Libev**等等，同时也包括了各个公司内部自己实现的事件驱动库。作为Hiredis库的使用者，如果你想在你的项目之中集成Hiredis的异步API，那么你需要将Hiredis与自己项目之中事件驱动库进行绑定。本小节会就如何与事件驱动库进行绑定进行介绍。
+
+### 异步API连接的建立
+
+### 异步API命令的发送与回调处理
+
+### 异步API连接的断开
+
+### 异步API状态迁移
 
 
 
