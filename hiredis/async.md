@@ -128,7 +128,115 @@ Hiredis异步API的高效之处就在，用户通过异步API执行查询命令�
 
 除了*Redis*服务器自身实现的事件驱动库之外，业内比较流行开源的事件驱动库包括**Libevent**、**Libev**等等，同时也包括了各个公司内部自己实现的事件驱动库。作为Hiredis库的使用者，如果你想在你的项目之中集成Hiredis的异步API，那么你需要将Hiredis与自己项目之中事件驱动库进行绑定。本小节会就如何与事件驱动库进行绑定进行介绍。
 
+为了实现与事件驱动库的绑定，Hiredis库的用户首先需要定义一个事件对象类型，用于在事件驱动库之中表示这个`redisAsyncContext`对象。我们来看一下，针对*Redis*自己的事件驱动库以及**Libevent**这个事件驱动库来说，这个事件对象类型的定义：
+
+```c
+typedef struct redisAeEvents {
+    redisAsyncContext *context;
+    aeEventLoop *loop;
+    int fd;
+    int reading, writing;
+} redisAeEvents;
+
+typedef struct redisLibeventEvents {
+    redisAsyncContext *context;
+    struct event *rev, *wer;
+} redisLibeventEvents;
+```
+
+这里我们可以发现，Hiredis异步API所需要的事件类型的定义中，至少应该包含有其对应的`redisAsyncContext`对象的信息；区分输入或者输出的标记，以及对应的事件驱动库对象的数据，例如`redisAeEvents.loop`以及`redisLibeventEvents.rev`和`redisLibeventEvents.wer`（由于在**Libevent**库之中，`struct event`本身就携带着事件驱动库对象`struct event_base`的信息，因此在结构体之中包含了`struct event`数据也就相当于包含了`struct event_base`这个事件驱动库的数据）。
+
+在Hiredis异步API之中已经定义了两个函数接口作为可读事件以及可写事件的回调处理函数：
+
+```c
+void redisAsyncHandleRead(redisAsyncContext *ac);
+void redisAsyncHandleWrite(redisAsyncContext *ac);
+```
+
+对于这两个函数接口，我们需要根据自己绑定的事件驱动库所对应的`Events`上进行一个简单的封装，以**Libevents**对应可读事件的处理函数为例：
+
+```c
+static void redisLibeventReadEvents(int fd, short event. void *arg)
+{
+    redisLibeventEvents *e = (redisLibeventEvents)arg;
+    redisAsyncHandleRead(e->context);
+}
+```
+
+也就是说，实际上注册到事件驱动库之中的可读事件处理函数为`redisLibeventReadEvents`，而这个函数最终是通过调用`redisAsyncHandleRead`来完成对可读事件的处理的。
+
+这样一来，我们自定义一个函数接口，将应用之中的事件驱动库以及`redisAsyncContext`对象绑定起来，还是以**Libevent**库为例：
+
+```c
+static int redisLibeventAttach(redisAsyncContext *ac, struct event_base *base)
+{
+    redisContext *c = &(ac->c);
+    redisLibeventEvents *e;
+    if (ac->ev.data != NULL)
+        return REDIS_ERR;
+    e = (redisLibeventEvents*)malloc(sizeof(*e));
+    e->context = ac;
+    ...
+    ac->ev.data = e;
+    e->rev = event_new(base, c->fd, EV_READ, redisLibeventReadEvent, e);
+    e->wev = event_new(base, c->fd, EV_WRITE, redisLibeventWriteEvent, e);
+    event_add(e->rev, NULL);
+    event_add(e->wev, NULL);
+    return REDIS_OK;
+}
+```
+
+通过上面这个函数接口，我们便初始化了一个`redisLibeventEvents`对象，并将其赋值给`redisAsyncContext.ev.data`对象，这样就建立起了`redisAsyncContext`对象与事件驱动库的绑定关系。
+
+回头我们再来看看异步API的数据结构定义：
+
+```c
+struct {
+	void *data;
+	void (*addRead)(void *privdata);
+	void (*delRead)(void *privdata);
+	void (*addWrite)(void *privdata);
+ 	void (*delWrite)(void *privdata);
+	void (*cleanup)(void *privdata);
+} ev;
+```
+
+这里处理`ev.data`字段用于储存我们自定义的`Events`对象之外，还有五个函数指针，同样的这也需要我们自己根据对应的事件驱动库来定义对应的函数接口，这些函数接口的含义为：
+
+- `ev.addRead`，我们需要自定义这个函数接口用于向事件驱动之中注册监听可读事件。
+- `ev.delRead`，我们需要自定义这个函数接口从事件驱动之中移除对可读事件的监听。
+- `ev.addWrite`，我们需要自定义这个函数接口用于向事件驱动之中注册监听可写事件。
+- `ev.delWrite`，我们需要自定义这个函数接口从事件驱动之中移除对可写事件的监听。
+- `ev.cleanup`，这个函数用清理`redisAsyncContext`对象，会从事件驱动之中移除可读事件以及可写事件的监听。
+
+这样，当我们向服务器发送一条查询命令之后，便可以通过调用`redisAsyncContext.ev.addRead`接口注册可读事件，进而在查询数据返回时触发可读事件回调函数，来处理数据。
+
 ### 异步API连接的建立
+
+```c
+redisAsyncContext *redisAsyncConnect(const char *ip, int port);
+redisAsyncContext *redisAsyncConnectBind(const char *ip, int port, const char *source_addr);
+redisAsyncContext *redisAsyncConnectBindWithReuse(const char *ip, int port, const char *source_addr);
+```
+
+通过上面的三个接口，我们可以异步地向*Redis*服务器发起连接，并返回`redisAysyncContext`对象，不过需要注意的是，上述三个函数返回的返回`redisAsyncContext`对象不可以直接使用，因此此时连接没有完全建立。我们需要`redisAysncContext`对象注册`onConnect`回调函数：
+
+```c
+#define _EL_ADD_WRITE(ctx) do { \
+		if ((ctx)->ev.addWrite) (ctx)->ev.addWrite((ctx)->ev.data); \
+	} while(0)
+int redisAsyncSetConnectCallback(redisAsyncContext *ac, redisConnectCallback *fn)
+{
+    if (ac->onConnect == NULL)
+    {
+        ac->onConnect = fn;
+        _EL_ADD_WRITE(ac);
+        return REDIS_OK;
+    }
+}
+```
+
+这里在向`redisAsyncContext`对象注册`onConnect`回调函数时，同时也会向事件驱动之中注册监听可写事件，这样当异步发起的连接被正式建立的时候，
 
 ### 异步API命令的发送与回调处理
 
