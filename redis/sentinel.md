@@ -36,17 +36,73 @@ redis-sentinel /path/to/sentinel.conf
 redis-server /path/to/sentinel.conf --sentinel
 ```
 
-而本质上，`redis-sentinel`以及`redis-server`这两个可执行文件是完全一样的两个文件，如果我们使用`md5sum`命令
+而本质上，`redis-sentinel`以及`redis-server`这两个可执行文件是完全一样的两个文件，如果我们使用`md5sum`命令来检查这两个可执行文件的**MD5**值，我们便可以发现这两个文件是完全一模一样的。
 
 ### 配置哨兵实例
+
+在*Redis*发行版的源代码之中，包含了一个名为`sentinel.conf`的配置文件，这个文件可以用于配置哨兵实例，一个典型的最小的配置文件可以入下面所示：
+
+```
+sentinel monitor mymaster 127.0.0.1 6379 2
+sentinel down-after-milliseconds mymaster 60000
+sentinel failover-time
+```
 
 
 
 ## 哨兵模式相关数据结构
 
-在*src/server.h*头文件中定义的服务器全局变量里，记录了*Redis*服务器是否是以``
+在*src/server.h*头文件中定义的服务器全局变量里，记录了*Redis*服务器是否是以哨兵模式在运行：
+
+```c
+struct redisServer
+{
+  ...
+  int sentinel_mode;
+  ...
+};
+```
+
+`redisServer.sentinel_mode`这个字段用于标记当前的*Redis*进程是否是哨兵模式，而后续的代码之中，我们将会看到，*Redis*程序正式通过这个字段进行判断，并执行哨兵模式的逻辑的。
+
+
 
 ## 哨兵模式代码实现
+
+
+
+在*src/sentinel.c*源文件之中，定义了哨兵模式所需要的数据结构。
+
+```c
+typedef struct instanceLink {
+    int refcount;          /* Number of sentinelRedisInstance owners. */
+    int disconnected;      /* Non-zero if we need to reconnect cc or pc. */
+    int pending_commands;  /* Number of commands sent waiting for a reply. */
+    redisAsyncContext *cc; /* Hiredis context for commands. */
+    redisAsyncContext *pc; /* Hiredis context for Pub / Sub. */
+    mstime_t cc_conn_time; /* cc connection time. */
+    mstime_t pc_conn_time; /* pc connection time. */
+    mstime_t pc_last_activity; /* Last time we received any message. */
+    mstime_t last_avail_time; /* Last time the instance replied to ping with
+                                 a reply we consider valid. */
+    mstime_t act_ping_time;   /* Time at which the last pending ping (no pong
+                                 received after it) was sent. This field is
+                                 set to 0 when a pong is received, and set again
+                                 to the current time if the value is 0 and a new
+                                 ping is sent. */
+    mstime_t last_ping_time;  /* Time at which we sent the last ping. This is
+                                 only used to avoid sending too many pings
+                                 during failure. Idle time is computed using
+                                 the act_ping_time field. */
+    mstime_t last_pong_time;  /* Last time the instance replied to ping,
+                                 whatever the reply was. That's used to check
+                                 if the link is idle and must be reconnected. */
+    mstime_t last_reconn_time;  /* Last reconnection attempt performed when
+                                   the link was down. */
+} instanceLink;
+```
+
+
 
 在*src/server.h*之中定义了接口函数：
 
