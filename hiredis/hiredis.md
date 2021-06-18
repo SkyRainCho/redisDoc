@@ -37,7 +37,8 @@ typedef struct redisContext {
 } redisContext;
 ```
 
-`redisConnect`函数用户创建一个`redisContext`对象。这里的`redisContext`结构体在Hiredis库之中用户存储与维护与*Redis*服务器之间连接的状态信息。当这个网络连接处于错误状态的时候，那么`redisContext.err`这个字段将会被设置为响应的错误码，而`redisContext.errstr`字段将存储对应的错误信息。关于错误信息的更多内容，可以查看后续的部分。因此这也就要求我们在通过`redisConnect`接口获取到一个`redisContext`对象之后，需要检查一下`redisContext.err`字段，以确认连接是否成功被建立。
+`redisConnect`函数用户创建一个`redisContext`对象。这里的`redisContext`上下文结构体在Hiredis库之中用于存储、维护与*Redis*服务器之间网络连接的状态信息。当这个网络连接处于错误状态的时候，那么`redisContext.err`这个字段将会被设置为相应的错误码，而`redisContext.errstr`字段将存储对应的错误信息。关于错误信息的更多内容，可以查看后续的部分。因此这也就要求我们在通过`redisConnect`接口获取到一个`redisContext`对象之后，需要检查一下`redisContext.err`字段，以确认连接是否成功被建立。
+
 ```c
 redisContext *c = redisConnect("127.0.0.1", 6379);
 if (c == NULL || c->err) {
@@ -85,7 +86,7 @@ typedef struct redisReply {
 } redisReply;
 ```
 
-`redisCommand`成功执行之后的返回值，用一个`redisReply`对象来保存。当命令执行出现错误时，`redisCommand`会返回`NULL`指针，同时会在`redisContext.err`字段上设置对应的错误码。一旦`redisContext`对象上出现了错误，那么用户将不能继续在这个对象上继续发送消息。如果后续还有向服务器发送查询命令的请求，则应该重新建立一个`redisContext`对象来使用。
+`redisCommand`成功执行之后的返回数据，会用一个`redisReply`对象来保存。当命令执行出现错误时，`redisCommand`会返回`NULL`指针，同时会在`redisContext.err`字段上设置对应的错误码。一旦`redisContext`对象上出现了错误，那么用户将不能继续在这个对象上继续发送消息。如果后续还有向服务器发送查询命令的请求，应该重新建立一个`redisContext`对象来使用。
 
 在返回数据`redisReply`对象之中，`redisReply.type`字段用于表示接收到的返回数据的类型：
 - **`REDIS_REPLY_STATUS`**
@@ -99,7 +100,7 @@ typedef struct redisReply {
 - **`REDIS_REPLY_STRING`**
     - 这个类型对应块数据（字符串）的返回。具体返回的数据会被存储到`redisReply.str`字段之中，这个字符串的长度则会被存储在`redisReply.len`字段之中。
 - **`REDIS_REPLY_ARRAY`**
-    - 这个类型对应多块数据的返回。多块返回数据之中子数据的个数会被存储到`redisReply.elements`字段上，在`redisReply`上的每一个字数据依然是一个`redisReply`对象，这个嵌套的`redisReply`对象可以通过`redisReply.elements[index]`进行访问。
+    - 这个类型对应多块数据`Multi-block`的返回，例如从一个集合对象之中查询所有的`field`数据，*Redis*会通过多块数据`Multi-block`的形式来返回。多块返回数据之中子数据的个数会被存储到`redisReply.elements`字段上，所有的子数据存储在`redisReply.element`这个数组之中。在`redisReply`上的每一个子数据依然是一个`redisReply`对象，这些嵌套的`redisReply`对象可以通过`redisReply.element[index]`进行访问。
 
 返回数据`redisReply`需要使用`freeReplyObject()`函数来释放。需要注意的是，这个函数会迭代地释放嵌套的`sub-reply`对象数据，因此我们不要用自己来主动释放这些`sub-reply`数据。
 
@@ -108,19 +109,20 @@ typedef struct redisReply {
 为了解释Hiredis在同步API之中对于流水线的支持，我们需要了解Hiredis发送查询命令的内部执行流程。
 
 当调用`redisCommand`系列函数发送*Redis*查询命令时，Hiredis首先将命令按照*Redis*协议的格式进行格式化。接下来格式化好的命令数据将被写入`redisContext`的输出缓冲区之中。这个输出缓冲区本质上是一个动态字符串，它可以存储任意数量的查询命令。当数据被写入输出缓冲区之后，Hiredis将会调用`redisGeReply`函数，这个函数将按照下面的逻辑进行执行：
-1. 当`redisContext`对象中的输入缓冲区非空时：
-    - 尝试从输入缓冲区之中解析初一个`redisReply`数据，并返回这个`redisReply`。
+1. 当`redisContext`对象中的输入缓冲区有数据时：
+    - 尝试从输入缓冲区之中解析出一个`redisReply`数据，并返回这个`redisReply`。
     - 如果无法解析出完整的`redisReply`数据，那么会执行下面的步骤2。
 1. 当`redisContext`对象中的输入缓冲区为空时：
     - 将整个输出缓冲区之中的数据，通过`write`系统调用全部写入Socket上。
     - 从Socket网络连接上调用`read`系统调用获取返回数据，直到可以解析出一个完整的`redisReply`数据为止。
 
-`redisGetReply`函数作为Hiredis库的API的一部分，可以在连接上有返回数据时调用这个函数`redisGetReply`来获取返回数据。对于流水线命令，唯一需要做的就是将命令数据填充到`redisContext`的输出缓冲区之内。对于这种情况，我们可以使用下面的这两个函数来实现填充数据但不发送数据的行为：
+`redisGetReply`函数作为Hiredis库的API的一部分，可以在网络连接上有返回数据时调用这个函数`redisGetReply`来获取返回数据。对于流水线命令，唯一需要做的就是将查询命令数据填充到`redisContext`的输出缓冲区之中。对于这种情况，我们可以使用下面的这两个函数来实现填充数据但不发送数据的行为：
+
 ```c
 void redisAppendCommand(redisContext *c, const char *format, ...);
 void redisAppendCommandArgv(redisContext *c, int argc, const char **argv, const size_t *argvlen);
 ```
-当调用这两个函数将查询命令数据写入输出缓冲区若干次后，再调用`redisGetReply`函数可以用来将缓冲区之中的命令数据一次性地发送到网络上并接收后续查询命令的返回数据。这个函数的返回值为`REDIS_OK`或者`REDIS_ERR`，当函数返回`REDIS_ERR`时，意味着在读取返回数据时出现错误，这时将会在`redisContext.err`字段上设置出现错误的具体原因。
+当调用这两个函数将查询命令数据写入输出缓冲区若干次后，调用`redisGetReply`函数可以将缓冲区之中的命令数据一次性地发送到网络上，然后等待并接收查询命令的返回数据。这个函数的返回值为`REDIS_OK`或者`REDIS_ERR`，当函数返回`REDIS_ERR`时，意味着在读取返回数据时出现错误，这时将会在`redisContext.err`字段上设置出现错误的具体原因。
 
 下面这个例子向我们展示了一个简单的流水线代码的编写范式：
 ```c
@@ -174,6 +176,26 @@ void redisFree(redisContext *c);
 
 ## 同步API代码实现
 
+首先我们看一下`redisContext`这个数据结构的各个字段的具体含义：
+
+1. `redisContext.err`，用于记录这个连接上的错误码，当连接没有错误时，这个字段会被设置为0。
+2. `redisContext.errstr`，当连接上发生错误的话，这个字符串字段存储了错误的具体信息。
+3. `redisContext.fd`，表示这个连接对应的文件描述符。
+4. `redisContext.flags`，记录这个*Redis*连接上的状态信息：
+   1. `REDIS_BLOCK`，这个掩码表示当前连接是否为阻塞连接，对于同步**API**的连接都是阻塞模式，而异步**API**连接则是使用非阻塞模式。
+   2. `REDIS_CONNECTED`，这一位掩码表示当前的连接是否已经建立，同步**API**中调用`connect`系统调用建立连接之后，或者个异步**API**中在连接的回调之中会给这个连接设置这个掩码。
+   3. `REDIS_DISCONNECTING`，这个掩码用于异步**API**之中，当尝试关闭连接的时候，会为连接设置这个掩码。在这种状态下，连接将不会继续接受新的查询命令请求，同时会刷新并清理输出缓冲区之中的数据，并将网络之中读取并解析所有的返回数据。
+   4. `REDIS_FREEING`，这个掩码用于异步**API**之中，当这个连接要被释放时，会给这个连接设置这个掩码，表示这个连接应该尽快被清理。
+   5. `REDIS_IN_CALLBACK`，这个掩码用于异步**API**之中，表示这个连接正在执行查询命令的回调函数。
+   6. `REDIS_SUBSCRIBED`，用于异步**API**之中，表示这个连接有一个或者更多的订阅操作。
+   7. `REDIS_MONITORING`，当使用监视器模式的时候，需要设置这个掩码。
+   8. `REDIS_REUSEADDR`，当对应的连接采用地址重用模式的时候，需要为这个连接设置这个掩码。
+5. `redisContext.obufs`，这是一个动态的`sds`类型的数据，作为连接的输出缓冲区。
+6. `redisContext.reader`，连接的输入缓冲区，`redisReader`这个对象类型集成了对于数据的解析功能。
+7. `redisContext.connection_type`，记录这个连接所使用的连接类型：
+   1. `REDIS_CONN_TCP`，表明这是一个Socket网络套接字。
+   2. `REDIS_CONN_UNIX`，表明这是一个Unix本地套接字。
+
 ### 建立连接
 在*deps/hiredis/net.h*以及*deps/hiredis/net.c*这两个文件之中定义了Hiredis库中关于网络连接的一些接口。首先在*deps/hiredis/net.c*源文件之中，定义了若干关于网络操作的静态函数接口，由于面前对于*Redis*服务器的底层网络API已经做过介绍，因此这里仅对相关函数进行一个简单的罗列：
 |静态函数接口|功能|
@@ -187,6 +209,7 @@ void redisFree(redisContext *c);
 
 除了上面这些基础的静态函数接口之外，*deps/hiredis/net.c*源文件之中还定义了两个比较重要的静态函数接口，
 首先是等待连接就绪的函数接口：
+
 ```c
 int redisContextWaitReady(redisContext *c, long msec)
 {
@@ -234,7 +257,7 @@ int _redisContextConnectTcp(redisContext *c, const char *addr, int port, const s
         goto error;
 }
 ```
-通过上面这个代码片段，我们可以发现不论`redisContext.flags`字段上是否携带了`REDIS_BLOCK`标记，客户端与服务器之间建立连接的过程都是采用非阻塞`connect`的调用来进行的，唯一区别在于同步的API在非阻塞`connect`之后，会通过`redisContextWaitReady`接口阻塞地等待连接建立；而在异步API之中，则不会通过`redisContextWaitReady`函数接口等待连接建立，取而代之的会将这个`redisContext`对象加入事件循环之中，通过回调函数来建立连接。
+通过上面这个代码片段，我们可以发现不论`redisContext.flags`字段上是否携带了`REDIS_BLOCK`标记，客户端与服务器之间建立连接的过程都是采用非阻塞`connect`的调用来进行的，而在前面对于`redisContext`数据结构的讲解中，我们也介绍了`REDIS_BLOCK`掩码使用表示同步**API**还是异步**API**的。而在建立连接的过程之中，唯一区别在于同步的API在非阻塞`connect`之后，会通过`redisContextWaitReady`接口阻塞地等待连接建立；而在异步API之中，则不会通过`redisContextWaitReady`函数接口等待连接建立，取而代之的会将这个`redisContext`对象加入事件循环之中，通过回调函数来建立连接。
 
 在*deps/hiredis/hiredis.h*以及*deps/hiredis/hiredis.c*这两个文件之中，定义了多干个用于发起连接的API：
 ```c
@@ -296,48 +319,29 @@ int redisBufferRead(redisContext *c);
 ```
 除了将数据从内核缓冲区读取到应用层缓冲区之外，`redisBufferRead`这个接口还会检测服务器端是否主动断开连接。如果`read`系统调用返回，但是读取的字节数为0，那么则意味着服务器端主动将连接断开。此时，会将`redisContext.err`这个字段设置为`REDIS_ERR_EOF`用以标记连接已经被断开。
 
-### 返回数据解析
-关于返回数据解析的主要逻辑，都被定义在*deps/hiredis/read.h*以及*deps/hiredis/read.c*这两个文件之中。这里Hiredis定义了一个`redisReader`的数据结构用于表示应用层缓冲区，同时也负责返回数据的解析工作：
-```c
-typedef struct redisReplyObjectFunctions {
-    void *(*createString)(const redisReadTask*, char*, size_t);
-    void *(*createArray)(const redisReadTask*, int);
-    void *(*createInteger)(const redisReadTask*, long long);
-    void *(*createNil)(const redisReadTask*);
-    void (*freeObject)(void*);
-} redisReplyObjectFunctions;
-
-typedef struct redisReader {
-    int err;
-    char errstr[128];
-
-    char *buf;
-    size_t pos;
-    size_t len;
-    size_t maxbuf;
-
-    redisReadTask rstack[9];
-    int ridx;
-    void *reply;
-
-    redisReplyObjectFunctions *fn;
-    void *privdata;
-} redisReader;
-```
-在`redisContext`对象之中负责接收与解析返回数据的`redisContext.reader`字段表示一个`redisReader`类型的数据。
-
-同时Hiredis还为这个`redisReader`类型定义几个公开的API，用于实现数据的接收与解析。
+上述的两个函数都是使用阻塞的方式调用`write`接口以及`read`接口来实现数据的发送与接收。而在同步**API**之中，数据的发送与接收都是通过介绍的`redisGetReply`来完成的：
 
 ```c
-int redisReaderFeed(redisReader *r, const char *buf, size_t len);
+int redisGetReply(redisContext *c, void **reply)
+{
+    if (redisGetReplyFromReader(c, &aux) == REDIS_ERR)
+        return REDIS_ERR;
+    if (aux == NULL && c->flags & REDIS_BLOCK)
+    {
+        do {
+            if (redisBufferWrite(c, *wdone) == REDIS_ERR)
+                return REDIS_ERR;
+        } while (!wdone);
+        
+        do {
+            if (redisBufferRead(c) == REDIS_ERR)
+                return REDIS_ERR;
+            if (redisGetReplyFromReader(c,&aux) == REDIS_ERR)
+                return REDIS_ERR;
+        } while (aux == NULL);
+    }
+}
 ```
-`redisReaderFeed`这个接口便是用于将一段从内核缓冲区之中读取到的数据填充到`redisReader.buf`这个缓冲区之中，`redisContext`用于从网络之中读取数据的接口`redisBufferRead`便是用`redisReaderFeed`这个函数实现数据的拷贝的。
-
-在`redisReader`获取到数据之后，便可以通过下面这个函数来实现数据的解析：
-```c
-int redisReaderGetReply(redisReader *r, void **reply);
-```
-`redisReaderGetReply`这个函数会尝试解析`redisReader.buf`之中的数据，如果数据足够组成一个`redisReply`数据，那么会通过`reply`参数返回`redisReply`数据的指针。
 
 以上便是关于Hiredis之中同步API的一个简要的介绍，谢谢大家阅读。
 
