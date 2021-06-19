@@ -36,15 +36,6 @@ int redisReaderGetReply(redisReader *r, void **reply)
 关于返回数据解析的主要逻辑，都被定义在*deps/hiredis/read.h*以及*deps/hiredis/read.c*这两个文件之中。
 
 ```c
-typedef struct redisReadTask {
-    int type;
-    int elements;
-    int idx;
-    void *obj;
-    struct redisReadTask *parent;
-    void *privdata;
-} redisReadTask;
-
 typedef struct redisReplyObjectFunctions {
     void *(*createString)(const redisReadTask*, char*, size_t);
     void *(*createArray)(const redisReadTask*, int);
@@ -85,6 +76,57 @@ typedef struct redisReader {
 
 - `redisReader.rstack`，辅助的栈结构，用于实现数据的解析。
 - `redisReader.ridx`，这个字段则用于记录当前正在运行的`redisReadTask`。
+
+由于结合了栈这种数据结构，这也意味着Hiredis是使用一种深度优先遍历的方式来实现数据的解析的：
+
+```c
+typedef struct redisReadTask {
+    int type;
+    int elements;
+    int idx;
+    void *obj;
+    struct redisReadTask *parent;
+    void *privdata;
+} redisReadTask;
+```
+
+Hiredis会使用`redisReadTask`对象来负责解析一个单一的返回数据，下面我们来看看这个深度优先的数据解析方式是如何工作的：
+
+```c
+int redisReaderGetReply(redisReader *r, void **reply)
+{
+    //第一次调用解析API时，需要初始化任务栈之中的数据
+    if (r->ridx == -1)
+    {
+        ...
+        r->ridx = 0;
+    }
+    
+    //采用迭代而非递归的方式来进行
+    while (r->ridx >= 0)
+    {
+        if (processItem(r) != REDIS_OK)
+        {
+            break;
+        }
+    }
+    
+    ...
+    //如果可以在这次调用之中解析出完整的返回数据，
+    //任务栈应该是被清空的状态，此时将解析出的返回数据通过reply参数进行返回
+    if (r->ridx == -1)
+    {
+        if (reply != NULL)
+        {
+            *reply = r->reply;
+        }
+        r->reply = NULL;
+    }
+    return REDIS_OK;
+}
+```
+
+以上便是Hiredis库之中关于返回数据解析的一个简要的介绍。
 
 ***
 
