@@ -1,6 +1,6 @@
 # Redis主从复制
 
-虽然*Redis*单机可以承载十万量级的并发请求，但是依然具有处理能力的上限，考虑正常情况下，对于数据的读取请求要远大对数据的写入请求。基于这个前提，*Redis*设计了一个复制的机制，应用这个复制机制，其他的*Redis*服务器可以拥有一个不断更新的数据副本，这样其他拥有数据副本的*Redis*服务器可以分担用户的读取请求，这样一来可以进一步提升*Redis*的并发能力，本篇文章将对*Redis*主从复制机制的相关功能与实现细节进项介绍。
+虽然*Redis*单机可以承载十万量级的并发请求，但是依然具有处理能力的上限，考虑正常情况下，对于数据的读取请求要远大对数据的写入请求。基于这个前提，*Redis*设计了一个复制的机制，应用这个复制机制，其他的*Redis*服务器可以拥有一个不断更新的数据副本，这样这些拥有数据副本的*Redis*服务器可以分担用户的读取请求，如此一来可以进一步提升*Redis*的并发能力，本篇文章将对*Redis*主从复制机制的相关功能与实现细节进项介绍。
 
 
 ## 复制功能概述
@@ -10,9 +10,9 @@
 #define CLIENT_MASTER (1 << 1)
 ```
 
-*Redis*本身也支持一个*Matser*实例连接多个*Slave*实例的模式，这样可以进一步提升系统的并发能力。*Redis*甚至可以在配置文件*redis.conf*之中通过配置项`min-reolicas-to-write`来指定*Master*实例所需要的*Slave*实例的最小数量，一旦*Matser*实例对应的*Slave*数量不足，则可以认为这个*Master*处于一种异常的状态，*Master*实例可以拒绝在这个状态下执行写命令。
+*Redis*本身也支持一个*Matser*实例连接多个*Slave*实例的模式，这样可以进一步提升系统的并发能力。*Redis*甚至可以在配置文件*redis.conf*之中通过配置项`min-reolicas-to-write`来指定*Master*实例所需要的*Slave*实例的最小数量。一旦*Matser*实例对应的*Slave*数量不足，便可以认为这个*Master*处于一种异常的状态，*Master*实例可以拒绝在这个状态下执行写命令。
 
-然而如果一个*Master*实例连接了过多的*Slave*实例的话，*Master*与*Slave*之间的数据传输对于*Master*实例本身来说也会造成一定的网络负载，因此*Redis*还支持一种层次化的主从模式，也就是说一个*Slave*实例也可以拥有它自己的*Slave*，我们可以称之为*Sub-Slave*。基于这种层次化的结构，顶层的*Master*实例只需要与若干个*Slave*实例进行数据传输，在有这些与顶层*Master*直连的*Slave*将数据发送给更为下层的*Slave*实例，以降低数据传输对*Master*实例性能所带来的影响。
+然而如果一个*Master*实例连接了过多的*Slave*实例的话，*Master*与*Slave*之间的数据传输对于*Master*实例本身来说也会造成一定的网络负载，因此*Redis*还支持一种层次化的主从模式，也就是说一个*Slave*实例也可以拥有它自己的*Slave*，我们可以称之为*Sub-Slave*实例。基于这种层次化的结构，顶层的*Master*实例只需要与若干少数个*Slave*实例进行数据传输，再由这些与顶层*Master*直连的*Slave*将数据发送给更为下层的*Slave*实例，以降低数据传输对*Master*实例性能所带来的影响。
 
 简单来说*Redis*的复制功能主要可以划分两个阶段：
 1. **数据同步**：*Slave*节点通过某种方式获取*Master*节点的数据副本，并将其加载到内存键空间之中，使该*Slave*节点成为*Master*节点的镜像节点。
@@ -20,6 +20,7 @@
 
 ### 数据同步
 *Redis*可以通过两种方式开启**数据同步**：
+
 1. 通过配置文件，在*redis.conf*配置文件之中，配置`replicaof <masterip> <masterport>`这条配置项，可以设置对应*Master*节点的地址；如果*Master*实例需要密码认证，可以通过`masterauth <master-password>`配置项来设置连接*Master*所需要认证密码。
 1. 执行**REPLICAOF**命令，命令的格式为`REPLICAOF host port`，通过这条命令，可以使执行这条命令的*Redis*成为给定地址`host`以及`port`的另一个*Redis*实例的*Slave*节点，不过这条命令有一个缺陷，如果你对应的*Master*节点需要密码验证，而在*redis.conf*配置文件之中没有提前设定*Master*节点的认证密码，那么需要在执行**REPLICAOF**命令之前，先通过**CONFIGSET**命令来设置`masterauth`的认证密码，否则将无法建立主从实例之间的数据同步。
 
@@ -33,9 +34,9 @@
 数据同步相当于将*Master*上键空间之中的全部数据发送给*Slave*实例，如果看过前面对于**RDB**持久化的介绍，我们可以发现这其中有很多相似之处，而实际上*Master*实例与*Slave*实例之间的数据同步也是通过**RDB**的机制来实现的。在*Redis*之中，复制机制中待同步数据的准备与传输方式有两种：
 
 1. *Redis*使用正常的方式，启动一个后台子进程来生成**RDB**文件到磁盘上，等待磁盘上的*RDB*文件生成结束，在通过网络连接将这个**RDB**文件发送给*Slave*节点。
-2. 如果*Master*实例所在的服务器上的磁盘性能很低的话，那么先向磁盘中写入数据再从磁盘进行读取与网络传输的话，会导致数据同步的效率很低。对于这种情况，*Redis*设计了一种无盘的数据同步方式，也就是不通过磁盘文件，而是在生成**RDB**文件的过程之中，直接将数据写入与*Slave*实例所建立的连接的套接字文件描述符上，*Slave*实例直接通过网络来接收*Master*发来的同步数据，这样可以大大提升针对单一*Slave*实例同步的速度。而这得益于**Linux**操作系统中*一切皆文件*的设计理念以及*Redis*自身实现的`rio`通用IO对象数据结构。
+2. 如果*Master*实例所在的服务器上的磁盘性能很低的话，那么先向磁盘中写入数据再从磁盘进行读取与网络传输的话，会导致数据同步的效率很低。对于这种情况，*Redis*设计了一种无盘的数据同步方式，也就是不通过磁盘文件，而是在生成**RDB**文件的过程之中，直接将数据写入与*Slave*实例所建立的连接的套接字文件描述符上，*Slave*实例直接通过网络来接收*Master*发来的同步数据，这样可以大大提升针对单一*Slave*实例同步的速度。而这得益于**Linux**操作系统中*一切皆文件*的设计理念以及*Redis*自身实现的`rio`通用IO对象数据结构对于IO操作的封装。
 
-虽然采用无盘方式进行数据同步的策略，会提升单一*Slave*实例的同步效率，免去了磁盘IO所带来的延时，但是这种方式也有一个问题，便是在多个*Slave*需要数据同步的时候，无法复用**RDB**文件，一旦为一个*Slave*实例开启了无盘的**数据同步**，如果另外一个*Slave*实例也来请求**数据同步**的话，*Master*也不得不进行重复两次**RDB**的生成过程。那么采用有磁盘的方式来进行数据同步的话，如果在生成**RDB**文件的过程中，又有一个*Slave*实例期望与*Master*实例之间进行数据同步的话，那么我们可以在**RDB**文件生成结束之后，将这个文件发送给多个等待数据同步的*Slave*实例，免去了重复生成**RDB**文件所带来的系统负载。
+虽然采用无盘方式进行数据同步的策略，会提升单一*Slave*实例的同步效率，免去了磁盘IO所带来的延时，但是这种方式也有一个潜在的问题，便是在多个*Slave*需要数据同步的时候，无法复用**RDB**文件。当*Master*实例正在为一个*Slave*实例进行无盘的**数据同步**，如果另外一个*Slave*实例也来请求**数据同步**的话，*Master*不得不进行重复两次**RDB**的生成过程。那么采用有磁盘的方式来进行数据同步的话，如果在生成**RDB**文件的过程中，又有一个*Slave*实例期望与*Master*实例之间进行数据同步的话，那么我们可以在**RDB**文件生成结束之后，将这个文件发送给多个等待数据同步的*Slave*实例，免去了重复生成**RDB**文件所带来的系统负载。
 
 上面所介绍的**数据同步**方式，无论是有盘的还是无盘的，其本质都是对*Master*实例上的数据进行一次全量的备份，*Slave*实例将网络连接上接收到的同步数据写入一个本地文件之中，当传输接收之后通过`rdbLoad`接口使用这个全量的数据备份还原*Master*上的数据。通过后面我们将要介绍的**命令转发**，*Master*与*Slave*之间可以保持数据上的一致性。但是如果在日常的运行之中，*Master*与*Slave*之间的网络连接出现问题，被转发的命令无法传递到*Slave*实例上，这将导致二者数据的不一致，为了解决这个问题，当*Slave*与*Master*直接重新建立连接时，会重新执行一次**数据同步**以继续维持两者间数据的一致性。早期的*Redis*也确实使用这种方式在重连时进行全量的**数据同步**的，但是这其中也存在一个问题，
 
@@ -45,7 +46,7 @@
 
 所谓**增量数据同步**，其设计思路是：
 1. 在*Master*一侧，
-    1. 维护一个唯一复制ID`replid`，用于区分各个*Redis*实例；
+    1. 维护一个唯一复制ID`replid`，用于标识当前的*Redis*实例；
     1. 维护一个复制偏移`master_repl_offset`，用于记录当前*Master*实例累积转发命令的计数，每转发一条命令，便会将该命令的长度信息累加到`master_repl_offset`这个偏移量上；
     1. 维护一个有限长度的，先进先出的积压缓冲区`repl_backlog`，当一条命令被转发给*Slave*实例的时候，也会被写入积压缓冲区之中，同时如果积压缓冲区已满，会将最早被写入的数据清空，以便能够继续写入新的命令。
 1. 而在*Slave*一层，代表*Master*的客户端之中也存储了*Master*实例同步过来的复制偏移量。
@@ -69,20 +70,47 @@ struct redisServer
 ```
 
 除此之外，*Master*实例上关于复制机制的相关数据可以被分为三个部分：
+
+```c
+struct redisServer
+{
+    char replid[CONFIG_RUN_ID_SIZE+1];
+    char replid2[CONFIG_RUN_ID_SIZE+1];
+    long long master_repl_offset;
+    long long second_replid_offset;
+    int slaveseldb;
+    
+    char* repl_backlog;
+    long long repl_backlog_size;
+    long long repl_backlog_histlen;
+    long long repl_backlog_idx;
+    long long repl_backlog_off;
+    
+    int repl_ping_slave_period;
+    time_t repl_backlog_time_limit;
+    time_t repl_no_slaves_since;
+    int repl_min_slaves_to_write;
+    int repl_min_slaves_max_lag;
+    int repl_good_slaves_count;
+    int repl_diskless_sync;
+    int repl_diskless_sync_delay;
+};
+```
+
 1. *Master*实例自身数据的维护：
     1. `redisServer.replid`，用于存储*Master*实例自身的复制ID，这是一个40位的随机字符串，用于对不同的*Redis*实例进行区分。
     1. `redisServer.master_repl_offset`，用于记录前面所提到的*Master*实例的复制偏移量。每次*Master*实例将命令写入到积压缓冲区之中的时候，会增加这个`master_repl_offset`复制偏移量。
     1. `redisServer.slaveseldb`，用于记录上一次执行复制命令对应的键空间编号；可以对应理解`redisServer.aof_selected_db`这个字段的作用。
 1. *Master*实例上积压缓冲区：
-    1. `redisServer.repl_backlog`，*Master*上的积压缓冲区，这个积压缓冲区是一段固定的被连续分配的内存。这个积压缓冲区是循环复用的，当写入的数据已经达到积压缓冲区的尾部时，新的数据会从积压缓冲区头部开始写入，并覆盖积压缓冲区之中的旧数据。
+    1. `redisServer.repl_backlog`，*Master*上的积压缓冲区，这个积压缓冲区是使用`malloc`分配的一段固定的连续内存。这个积压缓冲区是循环复用的，当写入的数据已经达到积压缓冲区的尾部时，新的数据会从积压缓冲区头部开始写入，并覆盖积压缓冲区之中的旧数据。
     1. `redisServer.repl_backlog_size`，积压缓冲区的长度。
     1. `redisServer.repl_backlog_histlen`，这个用于记录积压缓冲区之中实际数据的长度，这个字段数值的长度不会超过`repl_backlog_size`规定的上限。 
     1. `redisServer.repl_backlog_idx`，用于标记循环积压缓冲区之中当前的数据偏移，如果有新的数据要被写入积压缓冲区的话，将会从`repl_backlog_idx`的下一个字节开始数据写入。
-    1. `redisServer.repl_backlog_off`，这个用于记录积压缓冲区中有效数据的第一个字节对应于`master_repl_offset`的偏移量。
+    1. `redisServer.repl_backlog_off`，积压缓冲区数据偏移量，这个字段用于记录积压缓冲区中有效数据的第一个字节对应于`master_repl_offset`的偏移量。
 1. *Master*实例上关于*Slave*的统计与配置数据:
     1. `redisServer.repl_backlog_time_limit`，用于记录积压缓冲区的最大生存时间，如果*Master*实例长时间没有*Slave*实例连接，则会将积压缓冲区释放。
     1. `redisServer.repl_ping_slave_period`，用于配置*Master*实例与*Slave*实例发送**PING**命令的时间间隔。
-    1. `redisServer.repl_no_slaves_since`，记录*Master*上开始没有*Slave*连接的开始时间。
+    1. `redisServer.repl_no_slaves_since`，如果*Master*实例上的所有*Slave*实例都已经断开连接，那么这个字段记录*Master*上开始没有*Slave*连接的开始时间。
     1. `redisServer.repl_min_slaves_to_write`，配置*Master*实例上所需要的最小*Slave*实例数量
     1. `redisServer.repl_min_slaves_max_lag`，
     1. `redisServer.repl_good_slaves_count`，记录*Master*实例上，当前处于*good*状态的*Slave*实例数量。
@@ -95,12 +123,42 @@ struct redisServer
 {
     client* master;
     client* cached_master;
-}
+};
 ```
+前面已经介绍了，*Master*实例与*Slave*实例互为彼此的一个客户端，因此这里`redisServer.master`字段作为*Master*实例在*Slave*实例的一个客户端记录了*Matser*与*Slave*之间的连接信息。同时为了实现前面提到的主从之间的增量数据同步，需要在连接断开时，对`redisServer.master`的信息进行缓存，而这个缓存的*Master*客户端对象将会被存储在`redisServer.cached_master`字段之中。
+
+```c
+struct redisServer
+{
+    char *masterauth;
+    char *masterhost;
+    int masterport;
+    int repl_timeout;
+    int repl_syncio_timeout;
+    int repl_state;
+    off_t repl_tarnsfer_size;
+    off_t repl_transfer_read;
+    off_t repl_transfer_last_fsync_off;
+    int repl_transfer_s;
+    int repl_transfer_fd;
+    char *repl_transfer_tmpfile;
+    time_t repl_transfer_lastio;
+    int repl_serve_stale_data;
+    int repl_slave_ro;
+    int repl_slave_ignore_maxmemory;
+    time_t repl_down_since;
+    int repl_disavle_tcp_nodelay;
+    int slave_priority;
+    int slave_announce_port;
+    char *slave_announce_ip;
+};
+```
+
 另外还有一些数据字段用于维护*Slave*实例端的复制机制：
+
 1. `redisServer.masterhost`，在*Slave*实例一侧，记录*Master*主机所在的地址，通常在代码里通过这个字段是否为空来判断当前的*Redis*是否是主从模式之中的一个*Slave*实例。
 1. `redisServer.masterport`，在*Slave*一侧，记录*Master*对应的端口。
-1. `redisServer.repl_syncio_timeout`，在*Slave*实例一侧，在向*Master*实例发送内部命令时，是采用阻塞整个进程的同步IO方式进行传输的，`repl_syncio_timeout`这个字段用于设定每次同步IO的超时时间。
+1. `redisServer.repl_syncio_timeout`，在*Slave*实例一侧，在建立连接时，向*Master*实例发送内部命令是采用阻塞整个进程的同步IO方式进行传输的，`repl_syncio_timeout`这个字段用于设定每次同步IO的超时时间。
 1. `redisServer.repl_state`，用于记录在主从模式之中，当前*Slave*实例所处于的状态：
     1. `REPL_STATE_NONE`，表示当前服务器没有处于或者发起准备建立*Slave*的状态。
     1. `REPL_STATE_CONNECT`，通过配置或者**REPLICAOF**命令设置了*Master*地址信息之后，*Slave*实例会被置为这个状态，这个状态表示*Slave*将要与*Master*实例建立连接。
@@ -114,10 +172,10 @@ struct redisServer
     1. `REPL_STATE_RECEIVE_IP`，这个状态表示*Slave*已经通过**REPLCONF**命令向*Master*告知了自己的IP数据，正在等待*Master*的返回。
     1. `REPL_STATE_SEND_CAPA`，表示*Slave*实例将要向*Master*实例通过**REPLCONF**发送自己的CAPA信息。
     1. `REPL_STATE_RECEIVE_CAPA`，这个状态表示*Slave*已经通过**REPLCONF**命令向*Master*告知了自己的CAPA信息。正在等待*Master*的返回。
-    1. `REPL_STATE_SEND_PSYNC`，表示*Slave*实例将要向*Master*实例发送**PSYNC**命令以开启通过过程。
+    1. `REPL_STATE_SEND_PSYNC`，表示*Slave*实例将要向*Master*实例发送**PSYNC**命令以开启**数据同步**过程。
     1. `REPL_STATE_RECEIVE_PSYNC`，*Slave*发送完**PSYNC**命令后，等待*Master*实例的返回。
-    1. `REPL_STATE_TRANSFER`，**数据同步**逻辑开始执行，*Slave*实例处于该状态从连接上获取*Master*发送到的同步数据。
-    1. `REPL_STATE_CONNECTED`，**数据同步**逻辑结束，*Slave*将切换至该状态，后续将接受*Master*实例转发来的命令数据。
+    1. `REPL_STATE_TRANSFER`，**数据同步**逻辑开始执行，*Slave*实例处于该状态，并开始从连接上获取*Master*发送到的同步数据。
+    1. `REPL_STATE_CONNECTED`，**数据同步**逻辑结束，*Slave*将切换至该状态，后续将接受*Master*实例转发来的命令数据，用以维护数据的一致性。
 1. `redisServer.repl_transfer_size`，对于使用无盘的**数据同步**，该字段将会被设置为0；而对于有盘的**数据同步**，该字段为整个待传输的**RDB**文件的大小。
 1. `redisServer.repl_transfer_read`，用于记录*Slave*实例从网络连接上已经接收到的数据的数量。
 1. `redisServer.repl_transfer_last_fsync_off`，由于*Slave*实例收到的同步数据需要先写入磁盘，因此这个字段用于记录上次被写入到磁盘中的数据的偏移。
@@ -127,17 +185,40 @@ struct redisServer
 1. `redisServer.repl_transfer_lastio`，记录*Slave*实例上一次接收同步数据的时间戳。
 ### 客户端对象中复制相关的数据结构
 因为在*Redis*的复制机制之中，*Master*实例与*Slave*实例彼此将对方看做一个特殊的客户端，因此在`client`这个表示客户端的数据结构之中也存储了一系列用于维护复制功能相关的数据字段。
+
+```c
+struct client
+{
+    int replstate;
+    int repl_put_online_on_ack;
+    int repldbfd;
+    off_t repldboff;
+    off_t repldbsize;
+    sds replpreamble;
+    long long read_reploff;
+    long long reploff;
+    long long repl_ack_off;
+    long long repl_ack_time;
+    long long psync_initial_offset;
+    char replid[CONFIG_RUN_ID_SIZE + 1];
+    int slave_listening_port;
+    char slave_ip[NET_IP_STR_LEN];
+    int slave_capa;
+};
+```
+
 1. `client.replstate`，这个字段用于从*Master*的视角来看*Slave*对应客户端的状态：
     1. `SLAVE_STATE_WAIT_BGSAVE_START`，对应的*Slave*已经请求**数据同步**，正在等待*Master*开启**RDB**的生成逻辑。
     1. `SLAVE_STATE_WAIT_BGSAVE_END`，对应*Slave*同步请求的**RDB**文件生成流程已经开始执行，正在等待**RDB**文件生成结束。
     1. `SLAVE_STATE_SEND_BULK`，*Master*正在想这个`client`对应*Slave*实例发送**RDB**同步数据。
     1. `SLAVE_STATE_ONLINE`，*Master*已经向这个`client`对应的*Slave*实例完成发送**RDB**文件，开始进入命令转发的流程。
 1. `client.repldbfd`，*Master*用于同步的**RDB**文件的文件描述符。
-1. `client.reoldboff`，*Master*已经传输的**RDB**文件的大小。
+1. `client.repldboff`，*Master*已经传输的**RDB**文件的大小。
 1. `client.repldbsize`，*Master*传输的**RDB**文件的总大小。
 1. `client.replpreamble`，用于记录*Master*传输的**RDB**文件的一些前缀信息。对于有盘**RDB**传输，前缀信息中存储了**RDB**文件的长度；对于无盘**RDB**传输，前缀信息中存储了用于标记传输结束的`<EOF>`分隔字符串。
-1. `client.reploff`，在*Slave*上记录对应*Master*所发送的数据中已经被处理的数据偏移。
-1. `client.psync_initial_offset`，在*Master*实例一段用于记录对应*Slave*的初始偏移。
+1. `client.read_reploff`，在*Slave*一侧记录从*Master*中读取到的命令数据的偏移量
+1. `client.reploff`，在*Slave*一侧记录对应*Master*所发送的数据中已经被*Slave*处理的命令数据的偏移量。
+1. `client.psync_initial_offset`，在*Master*实例一侧用于记录对应*Slave*的初始偏移。
 1. `client.replid`，在*Slave*实例上记录*Master*实例的复制ID。
 1. `client.slave_listening_port`，在*Master*实例上记录的*Slave*通过**REPLCONF**命令传来的端口数据。
 1. `client.slave_ip`，在*Master*实例上记录的*Slave*通过**REPLCONF**命令传来的IP数据。
@@ -149,7 +230,7 @@ struct redisServer
 
 #### 积压缓冲区的创建
 
-在*Master*实例的一侧，*Redis*会维护一段连续分配的内存作为积压缓冲区，用于存储近期被同步给*Slave*的命令，以便当连接断开重连时，*Redis*执行部分的增量同步。初始情况下，*Redis*不会为积压缓冲区分配内存，当有需要的时候，则会通过下面这个函数来创建一个积压缓冲区：
+在*Master*实例的一侧，*Redis*会维护一段连续分配的内存作为积压缓冲区，用于存储近期被同步给*Slave*的命令，以便当连接断开重连时，*Redis*执行增量的数据同步。初始情况下，*Redis*不会为积压缓冲区分配内存，当有需要的时候，则会通过下面这个函数来创建一个积压缓冲区：
 
 ```c
 void createReplicationBacklog(void);
@@ -160,9 +241,9 @@ void createReplicationBacklog(void);
 1. 当第一个*Slave*实例通过**PSYNC**命令与*Master*开启同步时，会创建积压缓冲区。
 2. 当有*Slave*实例断线请求重连时，如果积压缓冲区已经被释放，则会重新创建一个积压缓冲区。
 
-在*Slave*一侧，由于主从复制支持层次结构，这也就意味着，一个*Slave*也可能是它的下级*Slave*的*Master*，因此在*Slave*一端也需要维护一段积压缓冲区，当一个*Slave*通过`readSyncBulkPayload`接口开始读取*Master*的同步数据时，也会通过`createReplicationBacklog`来创建一段积压缓冲区。
+由于主从复制支持层次结构，这也就意味着，一个*Slave*也可能是它的下级*Slave*的*Master*，因此在*Slave*一端也需要维护一段积压缓冲区，当一个*Slave*通过`readSyncBulkPayload`接口开始读取*Master*的同步数据时，也会通过`createReplicationBacklog`来创建一段积压缓冲区。
 
-积压缓冲区的大小通过`redisServer.repl_backlog_size`来存储，不过我们可以在运行期通过**CONF**命令来重新调整*Redis*的积压缓冲区的大小：
+积压缓冲区的大小通过`redisServer.repl_backlog_size`来存储，不过我们可以在运行期通过**CONF**命令来重新调整*Redis*的积压缓冲区的大小，下面这个函数用来调整积压缓冲区的大小：
 
 ```c
 void resizeReplicationBacklog(long long newsize);
@@ -188,10 +269,34 @@ void freeReplicationBacklog(void);
 
 ```c
 void feedReplicationBacklog(void *ptr, size_t len);
-void feedReplicationWithObject(robj *o);
+void feedReplicationBacklogWithObject(robj *o);
 ```
 
-这两个函数分别用于将一段内存数据写入积压缓冲区以及将一个对象数据结构`robj`写入解压缓冲区。由于*Redis*之中积压缓冲区是一个循环缓冲区，当缓冲区已经被写满，新的数据将会从积压缓冲区的起始位置重新进行写入。
+这两个函数分别用于将一段内存数据写入积压缓冲区以及将一个对象数据结构`robj`写入解压缓冲区。由于*Redis*之中积压缓冲区是一个循环缓冲区，当缓冲区已经被写满，新的数据将会从积压缓冲区的起始位置重新进行写入。而这一步操作会导致*Master*实例之中的复制偏移量`redisServer.master_repl_offset`的更新：
+
+```c
+void feedReplicationBacklog(void *ptr, size_t len)
+{
+    server.master_repl_offset += len;
+    //向循环积压缓冲区之中写入数据
+    ...
+        
+    if (server.repl_backlog_histlen > server.repl_backlog_size)
+        server.repl_backlog_histlen = server.repl_backlog_size;
+    
+    server.repl_backlog_off = server.master_repl_offset - server.repl_backlog_histlen + 1;
+}
+```
+
+从上面的代码片段我们可以看出，如果我们把服务器启动时的命令执行的初始状态设置为0的话，那么`redisServer.master_repl_offset`这个复制偏移量可以理解为*Master*实例上最后一条被执行的查询命令相对于服务器启动时初始状态的一个偏移量；而`redisServer.repl_backlog_off`这个积压缓冲区偏移量则可以认为是积压缓冲区之中的第一个数据相对于初始状态的偏移量，二者的差值便是积压缓冲区之中数据的大小。
+
+#### 积压缓冲区的数据请求
+
+```c
+long long addReplyReplicationBacklog(client *c, long long offset);
+```
+
+上面这个函数用于将积压缓冲区之中指定偏移量`offset`开始的有效数据发送给指定的*Slave*实例，并返回发送数据的长度。这个接口用于函数`masterTryPartialResynchronization`之中，用于处理*Slave*实例的发来的**增量数据同步**请求。
 
 ### 与Slave建立连接
 在*Redis*之中，*Master*实例与*Slave*实例建立连接的过程，从*Master*实例一侧来看主要是**REPLCONF**命令以及**PSYNC**这两个命令的处理过程。
@@ -346,7 +451,7 @@ int startBgsaveForReplication(int mincapa);
 ```c
 int replicationSetupSlaveForFullResync(client *slave, long long offset);
 ```
-调用这个函数，会将*Slave*对应的客户端`client.replstate`字段设置为`SLAVE_STATE_WAIT_BGSAVE_END`状态，表示其正在等待**RDB**文件生辰结束，同时设置这个*Slave*对应客户顿`client.psync_initial_offset`初始复制偏移字段为系统当前的复制偏移量。最后向*Slave*发送一条返回信息，消息的格式为：
+调用这个函数，会将*Slave*对应的客户端`client.replstate`字段设置为`SLAVE_STATE_WAIT_BGSAVE_END`状态，表示其正在等待**RDB**文件生成结束，同时设置这个*Slave*对应客户端对象`client.psync_initial_offset`初始复制偏移字段为系统当前的复制偏移量。最后向*Slave*发送一条返回信息，消息的格式为：
 
     +FULLRESYNC <replid> <offset>
 
@@ -372,7 +477,7 @@ void sendBulkToSlave(aeEventLoop *el, int fd, void *privdata, int mask);
 $<length>\r\n
 ```
 
-通过这个消息，*Slave*实例可以在接收数据之前，获得整个待接收数据的大小。接下来`sendBulkToSlave`接口会调用调用`read`系统调用从**RDB**文件之中读取`PROTO_IOBUF_LEN`大小的数据，并调用`write`系统调用接口，将数据发送给*Slave*实例。当所有的数据都发送结束之后，*Redis*会将这个客户端的可写事件处理函数从事件循环之中移除，以结束数据的传输，最后调用`putSlaveOnline`接口完成**数据同步**的最后操作。
+通过这个消息，*Slave*实例可以在接收同步数据之前，获得整个待接收数据的大小。接下来`sendBulkToSlave`接口会调用调用`read`系统调用从**RDB**文件之中读取`PROTO_IOBUF_LEN`大小的数据，并调用`write`系统调用接口，将数据发送给*Slave*实例。当所有的数据都发送结束之后，*Redis*会将这个客户端的可写事件处理函数从事件循环之中移除，以结束数据的传输，最后调用`putSlaveOnline`接口完成**数据同步**的最后操作。
 
 ```c
 void putSlaveOnline(client *slave);
@@ -439,10 +544,32 @@ int rdbSaveToSlavesSockets(rdbSaveInfo *rsi)
 
 #### 增量数据同步
 *Master*实例会在**PSYNC**的命令处理函数`syncCommand`之中来判断*Slave*发来的**PSYNC**命令，是否可以进行一次增量的**数据同步**。
+
 ```c
-int masterTryPartialResyncChronization(client *c);
+void syncCommand(client *c)
+{
+    if (c->flags & CLIENT_SLAVE) return;
+    ...
+    if (!strcasecmp(c->argv[0]->ptr, "psync"))
+    {
+        if (masterTryPartialResynchronization(c) == C_OK) {
+            server.stat_sync_partial_ok++;
+            return;
+        }
+        else
+        {
+            ...
+        }
+    }
+}
 ```
-上面这个函数，是*Master*判断处理增量**数据同步**的接口，如果可以进行增量同步，那么函数会返回`C_OK`；否则的话，函数返回`C_ERR`，后续则会进行全量数据的同步。`masterTryPartialResyncChronization`这函数的实现逻辑较为简单：
+
+如果可以，便进行**增量数据同步**，否则便进行**全量数据同步**。
+
+```c
+int masterTryPartialResynchronization(client *c);
+```
+上面这个函数，是*Master*判断是否可以进行增量**数据同步**的接口，如果可以进行增量同步，那么函数会返回`C_OK`；否则的话，函数返回`C_ERR`，后续则会进行全量数据的同步。`masterTryPartialResyncChronization`这函数的实现逻辑较为简单：
 1. 通过从客户端命令之中解析出**PSYNC**的参数`<replid>`以及`<reploffset>`，来判断这个*Slave*是否可以进行增量数据的同步：
     1. *Slave*发送的`<replid>`要与*Master*的`replid`相同。
     1. *Slave*通知的自己的复制偏移量`<reploffset>`要恰好落在*Master*的积压缓冲区内。
@@ -453,7 +580,8 @@ int masterTryPartialResyncChronization(client *c);
 
 
 ### 执行命令转发
-*Master*实例向*Slave*实例转发命令的过程，与向**AOF**文件之中追加命令的逻辑类似：
+*Master*实例向*Slave*实例转发命令的过程，与向**AOF**文件之中追加命令的逻辑类似在执行客户端查询命令的`call`接口之中通过调用`propagate`函数来实现的：
+
 ```c
 void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc, int flags)
 {
@@ -464,11 +592,42 @@ void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc, int fl
 }
 ```
 通过上面的代码，可以看出*Master*实例向*Slave*实例转发命令的逻辑，与追加**AOF**文件是先后进行的。
+
 ```c
 void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc);
 ```
-这个函数会将命令数据写入到服务器的积压缓冲区内，同时遍历*Slave*实例的双端链表，将命令转发给所有没处于`SLAVE_STATE_WAIT_BGSAVE_STATR`状态的*Slave*。对于处于`SLAVE_STATE_ONLINE`状态的*Slave*，命令数据直接会被发送到对端的*Slave*实例上；对于那些处于`SLAVE_STATE_WAIT_BGSAVE_END`或者`SLAVE_STATE_SEND_BULK`状态的实例，命令数据将会被写入客户端输入缓冲区里，等待全量数据同步结束后，通过前面所讲的重新注册可写事件处理函数`sendReplyToClient`，将缓冲区内的命令数据输出给*Slave*实例。
-这里还有一点与追加**AOF**命令相似，如果命令对应的数据库键空间编号与服务器中缓存的上一次操作的键空间不一致，那么在*Master*会向积压缓冲区里补充一条**SELECT**命令的记录，同时将这个命令转发给*Slave*实例。
+这个函数会将命令数据转发给`slaves`列表之中对应的所有的*Slave*实例，并将命令数据写入到服务器的积压缓冲区之中，这个函数会执行如下的逻辑：
+
+1. 校验服务器的状态，检查是否可以执行命令转发的逻辑。这里需要注意的是，虽然主从复制支持层次话的结构，但是中间层的节点无法通过`replicationFeedSlaves`函数将命令转发给自己的*Sub-Slave*子节点，而是通过另外一个函数`replicationFeedSlavesFromMasterStream`函数来实现命令的转发的。
+2. 如果执行命令针对的`dictid`和服务器上缓存的数据库ID`redisServer.slaveseldb`不同，那么会追加一条**SELECT**命令。
+3. 将命令数据通过`feedReplicationBacklog`以及`feedReplicationBacklogWithObject`接口追加到积压缓冲区之中。
+4. 最后遍历存储*Slave*实例的双端链表`slaves`，将命令转发给所有没处于`SLAVE_STATE_WAIT_BGSAVE_STATR`状态的*Slave*。对于处于`SLAVE_STATE_ONLINE`状态的*Slave*，命令数据直接会被发送到对端的*Slave*实例上；对于那些处于`SLAVE_STATE_WAIT_BGSAVE_END`或者`SLAVE_STATE_SEND_BULK`状态的实例，命令数据将会被写入客户端输出缓冲区里，等待全量数据同步结束后，通过前面所讲的重新注册可写事件处理函数`sendReplyToClient`，将缓冲区内的命令数据输出给*Slave*实例。
+
+对于*Slave*实例在收到*Master*实例发送来的命令数据后也是会运行正常的命令执行逻辑，但是对于多层结构的主从复制来说，*Slave*实例将数据转发给*Sub-Slave*实例的逻辑并不是在`replicationFeedSlaves`接口之中实现的，而是在命令执行结束时，通过调用另外一个`replicationFeedSlavesFromMasterStream`接口实现的：
+
+```c
+void processInputBufferAndReplicate(client *c)
+{
+    if (!(c->flags & CLIENT_MASTER))
+    {
+        processInputBuffer(c);
+    }
+    else
+    {
+        size_t prev_offset == c->reploff;
+        //在processInputBuffer之中会调用call函数接口执行查询命令
+        processInputBuffer(c);
+        size_t applied = c->reploff - prev_offset;
+        if (applied)
+        {
+            replicationFeedSlavesFromMasterStream(server.slaves, c->pending_querybuf, applied);
+            sdsrange(c->pending_querybuf,applied,-1);
+        }
+    }
+}
+```
+
+`replicationFeedSlavesFromMasterStream`接口的作用与`replicationFeedSlaves`类似，也会将命令数据写入积压缓冲区并转发给下一级的*Sub-Slave*实例。之所以使用的这种方式，按照*Redis*给出的解释是，这么做是方便传递“相同”数据流，并允许*Slave*实例共享*Master*实例的复制历史记录，相同的积压缓冲区以及偏移量。
 
 ## 从Slave角度看复制功能
 
@@ -481,7 +640,7 @@ REPLICAOF no one
 REPLICAOF <host> <port>
 ```
 
-1. 第一种形式，用于取消实例的*Slave*状态，将其转换为一个*Master*的实例。
+1. 第一种形式，用于撤销当前实例的*Slave*状态，将其转换为一个*Master*的实例。
 2. 第二种形式，用于将一个实例设置为某一个给定*Master*的*Slave*实例。
 
 ```c
