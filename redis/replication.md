@@ -224,9 +224,7 @@ struct client
 1. `client.slave_ip`，在*Master*实例上记录的*Slave*通过**REPLCONF**命令传来的IP数据。
 1. `client.slave_capa`，在*Master*实例上记录的*Slave*通过**REPLCONF**命令传来的capa数据。
 
-## 从Master角度看复制功能
-
-### 积压缓冲区的维护
+## 积压缓冲区的维护
 
 #### 积压缓冲区的创建
 
@@ -290,13 +288,159 @@ void feedReplicationBacklog(void *ptr, size_t len)
 
 从上面的代码片段我们可以看出，如果我们把服务器启动时的命令执行的初始状态设置为0的话，那么`redisServer.master_repl_offset`这个复制偏移量可以理解为*Master*实例上最后一条被执行的查询命令相对于服务器启动时初始状态的一个偏移量；而`redisServer.repl_backlog_off`这个积压缓冲区偏移量则可以认为是积压缓冲区之中的第一个数据相对于初始状态的偏移量，二者的差值便是积压缓冲区之中数据的大小。
 
+*Master*实例在向*Slave*实例转发查询命令的接口`replicationFeedSlaves`之中，会执行前面向积压缓冲区之中追加数据的逻辑：
+
+```c
+void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
+    if (server.slaveseldb != dictid)
+    {
+        //需要在积压缓冲区之中追加一条SELECT命令，用于切换数据库ID
+        robj *selectcmd;
+        ...
+        if (server.repl_backlog)
+            feedReplicationBacklogWithcObject(selectcmd);
+    }
+    ...
+    if (server.repl_backlog)
+    {
+        char aux[LONG_STR_SIZE+3];
+        aux[0] = '*';
+        len = ll2string(aux+1,sizeof(aux)-1,argc);
+        aux[len+1] = '\r';
+        aux[len+2] = '\n';
+        feedReplicationBacklog(aux,len+3);
+
+        for (j = 0; j < argc; j++) {
+            long objlen = stringObjectLen(argv[j]);
+            aux[0] = '$';
+            len = ll2string(aux+1,sizeof(aux)-1,objlen);
+            aux[len+1] = '\r';
+            aux[len+2] = '\n';
+            feedReplicationBacklog(aux,len+3);
+            feedReplicationBacklogWithObject(argv[j]);
+            feedReplicationBacklog(aux+len+1,2);
+        }
+    }
+    ...
+}
+```
+
 #### 积压缓冲区的数据请求
 
 ```c
 long long addReplyReplicationBacklog(client *c, long long offset);
 ```
 
-上面这个函数用于将积压缓冲区之中指定偏移量`offset`开始的有效数据发送给指定的*Slave*实例，并返回发送数据的长度。这个接口用于函数`masterTryPartialResynchronization`之中，用于处理*Slave*实例的发来的**增量数据同步**请求。
+上面这个函数用于将积压缓冲区之中从指定偏移量`offset`开始的有效数据发送给指定的*Slave*实例，并返回发送数据的长度。这个接口用于函数`masterTryPartialResynchronization`之中，用于处理*Slave*实例的发来的**增量数据同步**请求。
+
+## 主从连接的建立
+
+在积压缓冲区这个主从复制功能之中最为基础的模块了解之后，我们来看一下*Master*实例与*Slave*实例之间是如何建立连接的。
+
+由于主从复制是*Slave*实例主动发起的连接，因此我们先来看*Slave*实例一端，*Slave*可以通过**REPLICAOF**命令来建立与*Master*实例的连接，这个命令有两种形式：
+
+```
+REPLICAOF no one
+REPLICAOF <host> <port>
+```
+
+1. 第一种形式，用于解除当前实例在主从复制之中的*Slave*角色，将其转换为一个独立的可以进行写操作的*Redis*服务器实例。
+2. 第二种形式，用于将一个实例设置为某一个给定*Master*的*Slave*实例。
+
+```c
+void replicaofCommand(client *c);
+```
+
+上面这个命令处理函数会解析客户端命令的参数，分别处理上面的两种解除主从复制以及建立主从复制的过程。
+
+解除主从复制，是通过下面这个`replicationUnsetMaster`函数进行的：
+
+```c
+void replicationUnsetMaster(void);
+```
+
+这个函数会清空服务器上记录的*Master*数据信息`redisServer.masterhost`，同时释放在*Slave*一侧代表*Master*实例的客户端对象`redisServer.master`。在这个函数接口里会调用一个`shiftReplicationId`：
+
+```c
+void shiftReplicationId(void) {
+    memcpy(server.replid2,server.replid,sizeof(server.replid));
+    server.second_replid_offset = server.master_repl_offset+1;
+    //重新为实例生成server.replid复制ID
+    changeReplicationId();
+}
+```
+
+我们知道`redisServer.replid`之中存储了*Master*实例的复制ID，在前面对于数据结构的介绍之中，我们发现还有两个字段分别为`redisServer.replid2`以及`redisServer.scond_replid_offset`，那么这两个看似是复制ID以及复制偏移量的数据是做什么的呢？
+
+在后面我们介绍哨兵模式的时候会讲到，当一组主从复制的*Redis*实例中*Master*实例掉线，那么哨兵服务器会从所有的*Slave*实例之中选择一个实例将其提升为这组实例之中的*Matser*实例，这里`redisServer.replid2`以及`redisServer.scond_replid_offset`这两个字段便是为处理这种情况的。当一个*Slave*实例被提升至*Master*之后，会为这个实例重新生成一个复制ID，并把原有的上一个*Master*实例的复制ID转移到`redisServer.replid2`上，这样一来，其他的*Slave*节点可以使用原来的复制ID来向这个新的*Master*实例来请求数据。
+
+### 与Master建立连接
+
+而**REPLICAOF**命令建立与*Master*实例之间的连接是通过`replicationSetMaster`这个函数开始的：
+
+```c
+void replicationSetMaster(char *ip, int port)
+{
+    int was_master = server.masterhost == NULL;
+    
+   	sdsfree(server.masterhost);
+    server.masterhost = sdsnew(ip);
+    server.masterport = port;
+    if (server.master)
+    {
+        freeClient(server.master);
+    }
+	...
+    server.repl_state = REPL_STATE_CONNECT;
+}
+```
+
+这个函数会设置服务器上记录的*Master*实例的地址信息`redisServer.masterhost`以及`redisServer.masterport`两个字段；如果这个服务器曾经是另外一个*Master*实例的*Slave*，那么释放掉这个旧的*Master*客户端，并将当前服务器的状态`redisServer.repl_state`设置为`REPL_STATE_CONNECT`。
+
+不过这里我们发现`replicationSetMaster`函数并没有建立于*Master*服务器的连接，只是为*Slave*设置了建立连接所需要的数据。而真正进行连接，建立主从复制的逻辑，是在*Redis*的专门处理复制机制的心跳函数中进行的：
+
+```c
+void replicationCron(void)
+{
+    ...
+    if (Server.repl_state == REPL_STATE_CONNECT)
+    {
+        connectWithMaster();
+    }
+    ...
+}
+```
+
+这里*Redis*会检测当前服务器是否处于`REPL_STATE_CONNECT`的状态，如果满足条件的话便会调用`connectWithMaster`来与*Master*建立连接的。
+
+```c
+int connectWithMaster(void)
+{
+    fd = anetTcpNonBlockBestEffortBindConnect(NULL, server.masterhost, server.masterport, NET_FIRST_BIND_ADDR);
+    aeCreateFileEvent(server.el,fd,AE_READABLE|AE_WRITABLE,syncWithMaster,NULL);
+    server.repl_transfer_lastio = server.unixtime;
+    server.repl_transfer_s = fd;
+    server.repl_state = REPL_STATE_CONNECTING;
+}
+```
+
+这里建立连接的过程是使用非阻塞`connect`的方式发起的，由于非阻塞`connect`会立即返回，而此时连接并未真正建立，因此需要监听这个连接套接字上的可读与可写事件，并注册事件处理函数`syncWithMaster`；同时将当前服务的状态`redisServer.repl_state`设置为`REPL_STATE_CONNECTING`状态。
+
+当异步的连接建立成功时，会触发事件处理回调函数`syncWithMaster`，这个函数会完成在前面概述之中介绍的，内部发送**PING**命令检测连接的建立情况；执行内部**REPLCONF**命令将*Slave*的配置信息通知*Master*；最后根据自身的状态，向*Master*实例发送**PSYNC**命令，开启数据同步。
+
+最后，在数据同步结束之后，会通过`replicationCreateMasterClient`接口，使用主从复制网络连接的套接字`redisServer.repl_transfer_s`来创建一个表示*Master*实例的客户端对象`client`，将其存储在`redisServer.master`字段上。
+
+之所以建立连接的过程需要在`replicationCron`心跳函数之中进行，而不是执行**REPLICAOF**命令时立刻执行。这种方式有一个优点，一旦出现了*Slave*与*Maste*断开连接的情况，那么在`replicationCron`心跳函数之中，会检测连接状态并在断开连接的情况下，重启通过调用`connectWithMaster`来建立连接。
+
+## 数据同步
+
+## 命令转发
+
+## 从Master角度看复制功能
+
+### 积压缓冲区的维护
+
+
 
 ### 与Slave建立连接
 在*Redis*之中，*Master*实例与*Slave*实例建立连接的过程，从*Master*实例一侧来看主要是**REPLCONF**命令以及**PSYNC**这两个命令的处理过程。
@@ -631,87 +775,7 @@ void processInputBufferAndReplicate(client *c)
 
 ## 从Slave角度看复制功能
 
-### 与Master建立连接
 
-*Slave*实例一端，可以通过**REPLICAOF**命令来建立与*Master*实例的连接，这个命令有两种形式：
-
-```
-REPLICAOF no one
-REPLICAOF <host> <port>
-```
-
-1. 第一种形式，用于撤销当前实例的*Slave*状态，将其转换为一个*Master*的实例。
-2. 第二种形式，用于将一个实例设置为某一个给定*Master*的*Slave*实例。
-
-```c
-void replicaofCommand(client *c);
-```
-
-上面这个命令处理函数会解析客户端命令的参数，分别处理上面的两种解除主从复制以及建立主从复制的过程。
-
-解除主从复制，是通过下面这个`replicationUnsetMaster`函数进行的：
-
-```c
-void replicationUnsetMaster(void);
-```
-
-这个函数会清空服务器上记录的*Master*数据信息`redisServer.masterhost`，同时释放在*Slave*一侧代表*Master*实例的客户端对象`redisServer.master`。
-
-而建立主从复制则是通过`replicationSetMaster`这个函数开始的：
-
-```c
-void replicationSetMaster(char *ip, int port)
-{
-    int was_master = server.masterhost == NULL;
-    
-   	sdsfree(server.masterhost);
-    server.masterhost = sdsnew(ip);
-    server.masterport = port;
-    if (server.master)
-    {
-        freeClient(server.master);
-    }
-	...
-    server.repl_state = REPL_STATE_CONNECT;
-}
-```
-
-这个函数会设置服务器上记录的*Master*实例的地址信息`redisServer.masterhost`以及`redisServer.masterport`两个字段；如果这个服务器曾经是另外一个*Master*实例的*Slave*，那么释放掉这个旧的*Master*客户端，并将当前服务器的状态`redisServer.repl_state`设置为`REPL_STATE_CONNECT`。
-
-不过这里我们发现`replicationSetMaster`函数并没有建立于*Master*服务器的连接，只是为*Slave*设置了建立连接所需要的数据。而真正进行连接，建立主从复制的逻辑，是在*Redis*的专门处理复制机制的心跳函数中进行的：
-
-```c
-void replicationCron(void)
-{
-    ...
-    if (Server.repl_state == REPL_STATE_CONNECT)
-    {
-        connectWithMaster();
-    }
-    ...
-}
-```
-
-这里*Redis*会检测当前服务器是否处于`REPL_STATE_CONNECT`的状态，如果满足条件的话便会调用`connectWithMaster`来与*Master*建立连接的。
-
-```c
-int connectWithMaster(void)
-{
-    fd = anetTcpNonBlockBestEffortBindConnect(NULL, server.masterhost, server.masterport, NET_FIRST_BIND_ADDR);
-    aeCreateFileEvent(server.el,fd,AE_READABLE|AE_WRITABLE,syncWithMaster,NULL);
-    server.repl_transfer_lastio = server.unixtime;
-    server.repl_transfer_s = fd;
-    server.repl_state = REPL_STATE_CONNECTING;
-}
-```
-
-这里建立连接的过程是使用非阻塞`connect`的方式发起的，由于非阻塞`connect`会立即返回，而此时连接并未真正建立，因此需要监听这个连接套接字上的可读与可写事件，并注册事件处理函数`syncWithMaster`；同时将当前服务的状态`redisServer.repl_state`设置为`REPL_STATE_CONNECTING`状态。
-
-当异步的连接建立成功时，会触发事件处理回调函数`syncWithMaster`，这个函数会完成在前面概述之中介绍的，内部发送**PING**命令检测连接的建立情况；执行内部**REPLCONF**命令将*Slave*的配置信息通知*Master*；最后根据自身的状态，向*Master*实例发送**PSYNC**命令，开启数据同步。
-
-最后，在数据同步结束之后，会通过`replicationCreateMasterClient`接口，使用主从复制网络连接的套接字`redisServer.repl_transfer_s`来创建一个表示*Master*实例的客户端对象`client`，将其存储在`redisServer.master`字段上。
-
-之所以建立连接的过程需要在`replicationCron`心跳函数之中进行，而不是执行**REPLICAOF**命令时立刻执行。这种方式有一个优点，一旦出现了*Slave*与*Maste*断开连接的情况，那么在`replicationCron`心跳函数之中，会检测连接状态并在断开连接的情况下，重启通过调用`connectWithMaster`来建立连接。
 
 ### 执行数据同步
 在服务器全局变量之中关于关于*Master*实例的数据，是存储在`redisServer.master`这个字段上的；但是同时我们发现存在有另外一个字段`redisServer.cached_master`，看似这个数据也是与主从复制相关的内容。其实这是*Redis*在主从复制功能之中的一个特殊机制，`redisServer.cached_master`会缓存上一次连接的*Master*实例对应的客户端对象，这个缓存的客户端对象主要用于支持*Slave*发起增量的数据同步。缓存*Master*对应的客户端有两种方式：
