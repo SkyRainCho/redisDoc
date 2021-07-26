@@ -456,7 +456,7 @@ void replconfCommand(client *c);
 
 下面这个序列图所展示的，便是在主从机制之中，**Slave**实例是一步一步与**Master**实例建立连接的：
 
-![主从建立连接的序列图]()
+![主从建立连接的序列图](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/%E4%B8%BB%E4%BB%8E%E5%BB%BA%E7%AB%8B%E8%BF%9E%E6%8E%A5%E7%9A%84%E8%BF%87%E7%A8%8B.jpg)
 
 ## 数据同步
 
