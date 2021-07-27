@@ -60,11 +60,26 @@
 
 当用户在**Master**上执行一条写命令时，他可能需要确保这条命令已经被转发到**Slave**实例之后才可以进行后续的操作。原则上在主从复制机制之中，命令的转发是一个异步的过程，**Master**默认自己转发给**Slave**的命令均已经被**Slave**接收并处理。但是基于前面描述的这个场景，需要*Redis*能够实现一种对于转发命令的确认机制，因此*Redis*实现了这个**同步复制**的功能，来确保**Master**实例上执行的命令已经被**Slave**实例所执行。
 
+因此*Redis*提供了一个**WAIT**命令，这个命令的格式为：
+
+````
+WAIT <numreplicas> <timeout>
+````
+
+这个命令会阻塞调用该命令的用户，直到该用户所有的写命令已经被至少`<numreplicas>`个**Slave**实例接收并处理，或者等待`<timeout>`时间之后，返回超时。
+
+而这个机制它的底层实现则是**Master**实例与**Slave**实例之间确认机制：
+
+1. 在**Slave**实例一端，会以每秒1次的频率向**Master**发送确认消息`ack`，通报这个**Slave**当前确认接收的命令数据偏移量。
+2. 在**Master**一侧，当有用户执行**WAIT**命令时，则会向所有在线的**Slave**广播请求确认消息`getack`，强制要求**Slave**将自己当前确认的命令数据偏移量通报给**Master**。
+
+这样一来，**Master**便可以了解到各个**Slave**接收命令数据的详细信息。这里又引入了另外一个概念，便是**健康的Slave**，当某一个**Slave**实例出现问题，或者与**Master**之间的网络链接异常导致长时间没有向**Master**发送确认消息，这样的**Slave**便称为**不健康的Slave**；反之在*Redis*限定的阈值时间内， 能够及时向**Matser**通报确认消息的**Slave**便被成为**健康的Slave**。
+
 ## 复制功能相关数据结构
 
 ### 服务器全局变量中复制相关的数据结构
 *Redis*在`redisServer`这个数据结构之中，存储了一系列用于维护复制功能相关的字段。而服务器全局数据之中的数据字段可以被划分为*Master*实例与*Slave*实例所应用的数据。
-#### Master实例需要的数据
+#### Master实例关注的数据
 在*Master*实例上所有连接在这个服务器上的*Slave*实例节点，被存储在一个双端链表之中：
 ```c
 struct redisServer
@@ -120,7 +135,7 @@ struct redisServer
     1. `redisServer.repl_good_slaves_count`，记录*Master*实例上，当前处于*good*状态的*Slave*实例数量。
     1. `redisServer.repl_diskless_sync`，配置*Master*实例上，是否使用启用通过网络的无盘复制方式。
     1. `redisServer.repl_diskless_sync_delay`，配置*Matser*实例上启动无盘复制的延时时间，如一个*Slave*节点请求了一次无盘复制，这是*Master*将会延时一段时间在开启**RDB**数据的传输，这样如果在这段延时时间内，另外一个*Slave*节点也来请求一次无盘的**数据同步**，*Master*可以仅开启一次生成**RDB**文件的处理逻辑。
-#### Slave实例需要的数据
+#### Slave实例关注的数据
 在*Slave*实例上，*Redis*则是会一个单独的`client`对象来记录其对应的*Master*实例：
 ```c
 struct redisServer
@@ -939,9 +954,105 @@ void replicationFeedSlavesFromMasterStream(list *slaves, char *buf, size_t bufle
 
 ### 确认机制
 
-### 心跳机制
+```c
+void replicationSendAck(void);
+```
+
+在**Slave**一端会以1秒1次的频率调用`replicationSendAck`函数来向**Master**通报它当前已经处理的命令偏移量。这个函数会在内部构建一个如下格式的**REPLCONF**的命令：
+
+```
+REPLCONF ACK <offset>
+```
+
+而在**Master**端，则会触发**REPLCONF**命令的处理函数`replconfCommand`，该函数解析出`offset`数据，将其更新到该**Slave**实例对应的`client.repl_ack_off`字段上；同时并更新时间戳数据`client.repl_ack_time`信息，这个字段将用作衡量**健康的Slave**的标准。
+
+而**Master**强制要求**Slave**通报确认信息则是通过向**Slave**发送下面格式的**REPLCONF**命令来实现的：
+
+```
+REPLCONF GETACK *
+```
+
+当**Slave**实例收到这个命令之后，会强制调用`replicationSendAck`向**Master**发送确认信息。
+
+最后**Master**一侧也会定期调用`refreshGoodSlavesCount`来刷新**健康的Slave**的数量：
+
+```c
+void refreshGoodSlavesCount(void);
+```
+
+在*Redis*服务器的全局变量之中`redisServer.repl_min_slaves_max_lag`字段记录确认消息的间隔阈值，`refreshGoodSlavesCount`会遍历所有处于`SLAVE_STATE_ONLINE`状态的**Slave**，如果其上次确认消息的时间`client.repl_ack_time`和当前时间的差值在`redisServer.repl_min_slaves_max_lag`阈值之内，则刷新**健康的Slave**的数量，最终这个数量会被记录到`redisServer.repl_good_slaves_count`字段之上。
+
+### WAIT命令
+
+这里需要注意的是**WAIT**命令只能在**Master**上来执行。前面在我们介绍客户端对象的阻塞操作时，介绍了`blockingState`结构体，用于记录当前`client`对象的阻塞操作状态；而**WAIT**命令本质上也是客户端对象上的阻塞操作，`blockingState`也同样包含了这部分的信息：
+
+```c
+struct blockingState {
+    mstime_t timeout;
+    ...
+    int numreplicas;
+    long long reploffset;
+    ...
+};
+```
+
+这里：
+
+1. `blockingState.numreplicas`，这字段表示执行**WAIT**命令的客户端等待的**Slave**的数量。
+2. `blockingState.reploffset`，这个字段则是表示该客户端等待的**Slave**实例至少要确认`reploffset`这么多偏移量的命令数据。
+
+在前面介绍阻塞操作时，我们讲解过，`redisDb.blocking_keys`用于记录阻塞在给定**Key**上的客户端对象`client`的列表。再主从复制之中，*Redis*在服务器全局变量之中维护了一个双端链表来记录当前通过**WAIT**命令进入阻塞状态的客户端对象`client`：
+
+```c
+struct redisServer
+{
+    ...
+    list *clients_waiting_acks;
+    int get_ack_from_slaves;
+    ...
+};
+```
+
+当**Master**实例收到用户的**WAIT**命令时会调用`waitCommand`函数来处理这个命令：
+
+```c
+void waitCommand(client *c);
+```
+
+该函数会执行如下的处理逻辑：
+
+1. 解析命令参数，包括等待时间、等待**Slave**实例的个数，同时选择该用户对应客户端对象`client`的`client.woff`作为其等待的复制偏移量的值。
+2. 如果该客户端关注的复制偏移量已经被满足条件的**Slave**所接收，那么该函数将不会阻塞客户端，而是直接返回。
+3. 使用上面的数据初始化该客户端对象的`blockingState`信息，将该客户端加入服务器的等待链表`redisServer.clients_waiting_acks`之中。
+4. 调用`blockClient`接口将该客户端对象设置为阻塞状态。
+5. 调用`replicationRequestAckFromSlaves`，将`redisServer.get_ack_from_slaves`字段设置为1，这样在`beforeSleep`调用之中，*Redis*会检查该字段，并向所有的**Slave**发送**GETACK**命令，要求它们强制通告自己已经处理的复制偏移量。
+
+当有足够对的**Slave**实例向**Master**通报了自己的复制偏移量时，在`beforeSleep`接口之中会调用`processClientsWaitingReplicas`函数，将符合解锁条件的客户端对象从**WAIT**命令的阻塞状态之中解除。
+
+## 复制心跳机制
+
+最后我们在来看一下主从复制之中的心跳机制：
+
+```c
+void replicationCron(void);
+```
+
+`replicationCron`这个函数接口会在*Redis*的事件循环心跳函数`serverCron`之中以1秒1次的频率被调用执行。
+
+**Slave**实例通过这个函数接口可以完成：
+
+1. 在**REPLICAOF**命令执行结束之后，在下一次心跳之中通过`syncWithMaster`接口，发起与**Master**建立主从复制连接的过程。
+2. 通过`replicationSendAck`定期通报自己已经处理的复制偏移量的值。
+
+**Master**实例则可以通过这个函数接口完成：
+
+1. 在长时间没有**Slave**连接的情况下，通过调用`freeReplicationBacklog`释放积压缓冲区，清理内存。
+2. 在心跳之中，为**Slave**数据同步开启**BGSAVE**过程。
+3. 调用`refreshGoodSlavesCount`来刷新**健康的Slave**实例的个数。
 
 
+
+以上便是对于*Redis*主从复制机制的一个简要的介绍。
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
