@@ -210,6 +210,12 @@ typedef struct sentinelRedisInstance {
    2. 如果这是一个**Slave**实例，则会记录对应**Master**实例的地址数据，以及复制偏移量等信息。
 3. 用于处理故障迁移的数据。
 
+现在我们总结一些，在一个哨兵实例之中，存在着三类不同作用的字典`dict`数据结构：
+
+1. `sentinelState.masters`，这里存储这个**Sentienl**服务器监控的所有的**Redis**的**Master**服务器。
+2. `sentinelRedisInstance.sentinels`，对于一个在**Sentinel**服务器进程之中表示**Master**服的对象，这个字典`dict`之中存储了监控这个**Master**的所有的**Sentinel**服务器的`sentinelRedisInstance`对象。通过这个字典，一个**Sentinel**服务器可以自动感知到监控同一**Master**的其他**Sentinel**服务器。
+3. `sentinelRedisInstance.slaves`，对于一个在**Sentinel**服务器进程之中表示**Master**服的对象，这个字典`dict`之中存储了这个**Master**对应的全部**Slave**服务器。通过这个字典，**Sentinel**服务器可以自动感知到所监控的**Master**服务器所对应的**Slave**服务器信息。
+
 而在哨兵模式之中，是使用`instanceLink`这个结构体来表示哨兵实例与被监控实例之间的连接信息：
 
 ```c
@@ -330,7 +336,48 @@ void sentinelPendingScriptsCommand(client *c);
 
 ## 哨兵模式代码实现
 
+我们前面在介绍**Redis**命令系统之中介绍过，**Redis**通过定义在*src/server.c*源文件之中的`redisCommand`数组来初始化**Redis**的命令数据：
 
+```c
+struct redisCommand redisCommandTable[] = {
+    {"module",moduleCommand,-2,"as",0,NULL,0,0,0,0,0},
+    {"get",getCommand,2,"rF",0,NULL,1,1,1,0,0},
+    {"set",setCommand,-3,"wm",0,NULL,1,1,1,0,0},
+    ...
+};
+```
+
+而**Sentinel**实例是一种按照特殊启动方式启动的**Redis**服务器，其只能执行特定的，专属于**Sentinel**模式下的命令，这个命令的数据则被定义在*src/sentinel.c*源文件之中：
+
+```c
+struct redisCommand sentinelcmds[] = {
+    {"ping",pingCommand,1,"",0,NULL,0,0,0,0,0},
+    {"sentinel",sentinelCommand,-2,"",0,NULL,0,0,0,0,0},
+    {"subscribe",subscribeCommand,-2,"",0,NULL,0,0,0,0,0},
+    {"unsubscribe",unsubscribeCommand,-1,"",0,NULL,0,0,0,0,0},
+    {"psubscribe",psubscribeCommand,-2,"",0,NULL,0,0,0,0,0},
+    {"punsubscribe",punsubscribeCommand,-1,"",0,NULL,0,0,0,0,0},
+		...
+};
+```
+
+在**Sentinel**启动后的初始化函数`initSentinel`之中，会将这个`sentinelcmds`数组插入到服务器的命令字典`server.commands`之中：
+
+````c
+void initSentinel(void) {
+  ...
+	dictEmpty(server.commands,NULL);
+  for (j = 0; j < sizeof(sentinelcmds)/sizeof(sentinelcmds[0]); j++) {
+    int retval;
+    struct redisCommand *cmd = sentinelcmds+j;
+		retval = dictAdd(server.commands, sdsnew(cmd->name), cmd);
+		serverAssert(retval == DICT_OK);
+	}
+  ...
+}
+````
+
+如果正常的**Redis**服务器会有一个
 
 在*src/sentinel.c*源文件之中，定义了哨兵模式所需要的数据结构。
 
