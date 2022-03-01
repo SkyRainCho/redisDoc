@@ -48,7 +48,48 @@ sentinel down-after-milliseconds mymaster 60000
 sentinel failover-time
 ```
 
+## Raft算法
 
+之所以在这里介绍**Raft**算法，是因为在故障迁移的过程之中，当**主从**集群之中的**Master**服务器下线时，负责监控这些**Redis**服务器的**Sentinel**集群便会应用**Raft**算法，从集群中的所有**Sentinel**服务器之中选举出一个**Leader**服务器，在由这个**Leader**服务器对**Master**服务器进行故障迁移的操作。在介绍**Raft**算法之前，我们先来看一下提出**Raft**算法的缘由，也就是分布式系统之中著名的**拜占庭将军问题**。
+
+### 拜占庭将军问题
+
+首先我们来看一下对于**拜占庭将军问题**的一个简要描述：
+
+> 拜占庭将军问题是一个协议问题，拜占庭帝国军队的将军们必须全体一致的决定是否攻击某一支敌军。问题是这些将军在地理上是分隔开来的，并且将军中存在叛徒。叛徒可以任意行动以达到以下目标：
+>
+> 1. 欺骗某些将军采取进攻行动；
+> 2. 促成一个不是所有将军都同意的决定，如当将军们不希望进攻时促成进攻行动；
+> 3. 或者迷惑某些将军，使他们无法做出决定。
+>
+> 如果叛徒达到了这些目的之一，则任何攻击行动的结果都是注定要失败的，只有完全达成一致的努力才能获得胜利。
+>
+> 拜占庭假设是对现实世界的模型化，由于硬件错误、网络拥塞或断开以及遭到恶意攻击，计算机和网络可能出现不可预料的行为。
+>
+> ​																			引自百度百科
+
+上述这个**拜占庭将军问题**是对于分布式系统之中最复杂、最严格的容错模型，然而实际问题之中，我们遇到更多的是分布式系统之中的某一台主机下线或者由于网络问题数据无法送达。基于这个前提，便得到了一个简化版本的**拜占庭将军问题**。在这个简化的问题之中：
+
+1. 将军之中没有叛徒
+2. 将军之间传递消息的信使所传递的消息都是可靠的
+3. 信使有可能被杀导致消息无法被送达
+
+而**Raft**算法便是一种解决这个简化**拜占庭将军问题**的共识算法，该算法具有运行效率高、理解容易的特点。这里我们简单描述一下**Raft**算法是如何解决**拜占庭将军问题**的。**Raft**算法的解决方案是从所有的大将军之中选举出一个领导人，后续所有的决定都由这个领导人来做。
+
+假设有若干名将军，那么这个从将军之中选举领导人的过程为：
+
+1. 为每一个将军设置一个随机时间的倒计时计时器
+2. 当某一个将军的倒计时结束后，首先投票选择自己作为领导人，然后向其他所有的将军发送一条投票请求，请求其他将军选择自己作为领带人
+3. 其他将军收到投票请求后，如果还没有选自己作为领导人，那么便同意对方的投票请求，并告知对方；如果已经选择了自己作为领导人，或者已经同意了其他人的投票请求，那么便拒绝该投票请求，并告知对方
+4. 如果某一个将军收到了超过半数的投票，那么这个将军便会成为领导人；如果所有将军都没有收到过半数的投票，那么在下一轮倒计时结束之后，会重启开启一轮选举，直到选择出领导人。
+
+### Raft算法之节点
+
+在**Raft**算法之中每一个节点对应于**拜占庭将军问题**之中的一位将军，也对应于分布式系统之中的一台主机或者一个进程。节点一共拥有三种状态，**Follower**、**Candidate**、**Leader**，在这三种状态之中：
+
+1. **Follower**节点，初始状态下所有的节点都是**Follower**状态。每个**Follower**节点有一个随机时间的计时器，倒计时结束时，如果没有收到其他节点的投票请求，那么会将自己转化为**Candidate**节点，并向其他节点发送投票请求。
+2. **Candidate**节点会等待其他节点的投票返回，如果该**Candidate**收到了过半数的确认投票后，会将自己升级为**Leader**节点，在一个分布式系统之中允许存在多个**Candidate**节点。
+3. **Leader**节点则负责整个集群的决策选择。
 
 ## 哨兵模式相关数据结构
 
@@ -205,9 +246,87 @@ typedef struct instanceLink {
 1. `instanceLink.cc`用于表示命令连接。
 2. `instanceLink.pc`用于表示定于连接。
 
-除此之外，`instanceLink.refcount`字段用于表示这个连接对象的引用计数，这也就意味着多个`sentinelRedisInstance`会引用相同的`instanceLink`连接对象。这主要是因为哨兵实例会在`sentinel.masters`关联其监控的所有实例；而对于**Master**实例对象`sentinelRedisInstance`会用通过`sentinelRedisInstance.sentinels`
+除此之外，`instanceLink.refcount`字段用于表示这个连接对象的引用计数，这也就意味着多个`sentinelRedisInstance`会引用相同的`instanceLink`连接对象。这主要是因为哨兵实例会在`sentinel.masters`关联其监控的所有实例；而对于**Master**实例对象`sentinelRedisInstance`会用通过`sentinelRedisInstance.sentinels`来反向关联监控它的哨兵对象实例。因此在这里便有了共享`instanceLink`对象的必要性。
 
+下面我们来简单地介绍一下关于`instanceLink`对象上若干操作函数：
+```c
+instanceLink *createInstanceLink(void);
+```
+`createInstanceLink`函数用于创建一个`instanceLink`对象，并对相关字段使用默认值进行初始化。
 
+```c
+void instanceLinkCloseConnection(instanceLink *link, redisAsyncContext *c);
+```
+这个函数用于关闭给定`instanceLink`对象上的指定的Hiredis异步API连接`redisAsyncContext`。
+
+```c
+instanceLink *releaseInstanceLink(instanceLink *link, sentinelRedisInstance *ri);
+```
+由于实际上`instanceLink`对象可以被多个`sentinelRedisInstance`对象共享，因此如果要释放一个`instanceLink`对象时，不能简单地将这个对象分配的内存`free`掉。而是需要将对象上的引用计数`instanceLink.refcount`减一，直到减到零位置，在真正地关闭连接上的`redisAsyncContext`，并释放内存。
+
+```c
+int sentinelTryConnectionSharing(sentinelRedisInstance *ri);
+```
+上面这个`sentinelTryConnectionSharing`函数则可以用来实现`sentinelRedisInstance`实例对象上`instanceLink`对象的共享，遍历`sentinel.masters`之中的每一个`sentinelRedisInstance`对象，并从`sentinelRedisInstance.sentinels`查找运行ID与`ri`相同的`sentinelRedisInstance`，然后便可通过共享来复用已有的`instanceLink`对象。
+
+前面也介绍了哨兵模式下，如果监控的*Redis*实例出现了故障，哨兵实例会将事件通知给系统管理员，通知的方式有多种多样，可以通过邮件进行通知，也可以通过其他的系统进行通知。因此在哨兵模式之中，具体的通知方式被下放给了哨兵模式的使用者，使用者可以自行实现通知脚本，并将通知脚本的路径写入哨兵模式的配置文件之中，当系统出现故障时，哨兵模式会自动创建一个子进程用于用于事件的通知。
+
+在哨兵模式下，系统使用`sentinelScriptJob`来表示这些使用脚本来进行事件通知的任务：
+```c
+typedef struct sentinelScriptJob
+{
+  int flags;
+  int retry_num;
+  char **argv;
+  mstime_t start_time;
+  pid_t pid;
+} sentinelScriptJob;
+```
+
+而在哨兵模式的服务器全局变量之中，也会使用一个双端链表`list`来存储这些通知的任务：
+```c
+struct sentinelState
+{
+  ...
+  list *scripts_queue;
+  int running_scripts;
+  ...
+}
+```
+除了`running_scripts`用于存储脚本任务之外，`running_scripts`字段则会用来记录正在运行的脚本任务的数量，哨兵模式下，同一个时刻最多可以运行不超过`SENTINEL_SCRIPT_MAX_RUNNING`个脚本任务。
+
+通过下面这个函数，我们可以释放一个`sentinelScriptJob`对象分配的内存：
+```c
+void sentinelReleaseScriptJob(sentinelScriptJob *sj);
+```
+
+而如何发起一个脚本任务，在哨兵模式之中则是使用一个队列来实现的，如果需要启动一个脚本任务，则在`sentinel.scripts_queue`之中插入一个表示任务的`sentinelScriptJob`，哨兵模式会在心跳之中自动检查队列并创建子进程执行脚本任务。
+
+将一个脚本任务加入调度队列，是通过`sentinelScheduleScriptExecution`这个函数来执行的：
+```c
+void sentinelScheduleScriptExecution(char *path, ...);
+```
+这个函数需要调用者给出脚本在文件系统之中的路径以及运行脚本所需要的脚本参数。同时需要注意的是，哨兵模式的脚本任务调度队列`sentinel.scripts_queue`具有一个最大的长度上限的`SENTINEL_SCRIPT_MAX_QUEUE`，当调度队列长度达到上限的话，会删除队列里还没有被执行的任务中最早被加入队列的任务。
+
+而在心跳之中运行脚本任务则是通过下面这个函数来执行的：
+```c
+void sentinelRunPendingScripts(void);
+```
+这个函数会通过`fork`系统调用创建子进程来运行指定的任务脚本，并在哨兵父进程之中更新对应任务的`sentinelScriptJob.pid`，以及系统当前运行脚本任务计数器`sentinel.running_scripts`。
+
+由于脚本任务是在子进程之中异步运行的，因此哨兵父进程需要定期查询子进程的运行状态，在系统心跳之中哨兵模式会使用`sentinelCollectTerminatedScripts`来执行这个检查逻辑：
+```c
+void sentinelCollectTerminatedScripts(void);
+```
+该函数会通过`wait3`系统调用检查子进程的状态，对于成功运行结束的脚本任务哨兵模式会将其从`sentinel.scripts_queue`队列之中删除；而对于那些因为信号被异常中断或者脚本内部返回退出码`1`时，这些异常任务将在下一个心跳时被重新执行。
+
+最后如果某个脚本任务运行的事件过长，则可以在系统心跳之中通过`sentinelKillTimedoutScripts`进行检查，并通过`kill`系统调用将对应的子进程杀掉。
+
+最后用户可以通过`SENTINEL PENDING-SCRIPTS`命令来检查当前的哨兵实例上运行的脚本任务的数据：
+```c
+void sentinelPendingScriptsCommand(client *c);
+```
+这个函数会遍历`sentinel.scripts_queue`队列，将队列之中的脚本任务的具体信息返回给执行命令的用户。
 
 ## 哨兵模式代码实现
 
@@ -257,6 +376,12 @@ void sentinelIsRunning(void);
 ```
 
 重置一个被监视的**Master**实例的状态，
+
+实例之间进行交互的接口：
+```c
+void sentinelEvent(int level, char *type, sentinelRedisInstance *ri, const char *fmt, ...);
+```
+这个函数主要用于将一些消息通过**发布/订阅**连接发送给指定的`sentinelRedisInstance`对象所代码的实例。这里`level`用于标记通知消息的等级，当我们发送`LL_WARNING`等级的消息时，将会触发前面介绍用户通知的脚本。
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
