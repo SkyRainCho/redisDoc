@@ -202,7 +202,7 @@ typedef struct sentinelRedisInstance {
 } sentinelRedisInstance;
 ```
 
-在`sentinelRedisInstance`这个数据结构之中，主要由三个模块的内容：
+在`sentinelRedisInstance`这个数据结构之中，主要由三个部分的内容组成：
 
 1. 用于描述实例信息的数据字段，例如地址信息以及连接数据。
 2. 用于描述与该实例关联的实例的信息：
@@ -336,6 +336,56 @@ void sentinelPendingScriptsCommand(client *c);
 
 ## 哨兵模式代码实现
 
+### Sentinel实例的初始化
+
+让我们使用`redis-sentinel sentinel.conf`这个命令来启动一个**Sentinel**时，我们可以在*src/server.c*源文件的入口`main`函数中了解到整个**Sentinel**的启动过程：
+
+```c
+int main(int argc, char **argv)
+{
+  ...
+	server.sentinel_mode = checkForSentinelMode(argc,argv);
+  ...
+  if (server.sentinel_mode)
+  {
+    initSentinelConfig();
+    initSentinel();
+  }
+  ...
+  if (argc >= 2)
+  {
+    ...
+    loadServerConfig(configfile,options);
+  	...
+  }
+  ...
+  if (!server.sentinel_mode)
+  {
+    ...
+  }
+  else
+  {
+    InitServerLast();
+    sentinelIsRunnig();
+  }
+  ...
+  aeSetBeforeSleepProc(server.el,beforeSleep);
+  aeSetAfterSleepProc(server.el,afterSleep);
+  aeMain(server.el);
+  aeDeleteEventLoop(server.el);
+  return 0;
+}
+```
+
+这里我们可以看到在**Sentinel**实例的入口`main`函数之中，执行了如下的逻辑：
+
+1. 通过`checkForSentinelMode`检查当前的**Redis**是否是以**Sentinel**模式启动的，这里当使用`redis-sentinel`或者`redis-server --sentinel`来启动时，都会被认为是**Sentinel**模式。
+2. 通过`initSentinelConfig`以及`initSentinel`来执行**Sentinel**的初始化逻辑，包括对`sentinelState`结构体之中数据字段的初始化，以及可执行名字的字典`redisServer.commands`。
+3. 在`loadServerConfig`函数之中，通过调用`sentinelHandleConfiguration`函数，读取配置文件，对**Sentinel**实例的配置信息进行初始化。这里最为重要的一个步骤是，读取配置文件之中监控**Master**实例的配置`sentinel monitor <name> <host> <port> <quorum> `，来初始化该**Sentinel**监听列表字典`sentinelState.masters`。这里会调用`createSentinelRedisInstance`函数为每一个被监听的**Master**创建一个对应的`sentinelRedisInstance`实例。
+4. 在最后，通过调用的`sentinelIsRunning`函数，为**Sentinel**分配一个随机运行ID，并通过`sentinelGenerateInitialMonitorEvents`函数向`+monitor`频道上发布一条消息。
+
+#### **Sentinel**数据初始化
+
 我们前面在介绍**Redis**命令系统之中介绍过，**Redis**通过定义在*src/server.c*源文件之中的`redisCommand`数组来初始化**Redis**的命令数据：
 
 ```c
@@ -377,7 +427,80 @@ void initSentinel(void) {
 }
 ````
 
-如果正常的**Redis**服务器会有一个
+#### Sentinel配置加载
+
+```c
+void loadServerConfigFromString(char *config)
+{
+  ...
+	else if (!strcasecmp(argv[0],"sentinel")) {
+	/* argc == 1 is handled by main() as we need to enter the sentinel
+	* mode ASAP. */
+		if (argc != 1) {
+			if (!server.sentinel_mode) {
+				err = "sentinel directive while not in sentinel mode";
+				goto loaderr;
+			}
+			err = sentinelHandleConfiguration(argv+1,argc-1);
+			if (err) goto loaderr;
+		}
+	}
+  ...
+}
+```
+
+**Sentinel**在加载配置时，会读取配置文件之中所有以`sentinel`开头的行作为配置项，通过`sentinelHandleConfiguration`函数进行加载，在所有的配置项之中，有两项是与建立同**Master**的连接相关：
+
+```
+sentinel monitor <master-name> <host> <port> <quorum>
+sentinel auth-pass <master-name> <password>
+```
+
+其中，如果指定的**Master**没有密码认证的话，`auth-pass`这一项可以省略。
+
+```c
+char *sentinelHandleConfiguration(char **argv, int argc);
+sentinelRedisInstance *createSentinelRedisInstance(char *name, int flags, char *hostname, int port, int quorum, sentinelRedisInstance *master);
+```
+
+在`sentinelHandleConfiguration`函数之中，当读取到一条`monitor`配置项的时候，便会调用`createSentinelRedisInstance`函数，根据配置项之中的内容，创建一个`SRI_MASTER`类型的`sentinelRedisInstance`对象，并将之加入到`sentinelState.masters`字典之中。不过这里只是创建在代表**Master**的实例对象，但是并没有建立**Sentinel**与**Master**之前的实际网络连接。
+
+在读取到`auth-pass`配置项时，会通过`<master-name>`在`sentinelState.masters`之中产查找到对应的`sentinelRedisInstance`实例，并将密码赋值给`sentinelRedisInstance.auth_pass`字段，用于后续建立连接之用途。
+
+#### Sentinel完成初始化
+
+除了上述`initSentinel`初始化函数之外，**Sentinel**还提供了另外一个函数用于执行剩余的初始化逻辑:
+
+```c
+void sentinelIsRunning(void);
+```
+
+这个函数大致会执行三种逻辑：
+
+1. 调用`getRandomHexChars`为**哨兵**实例初始化一个随机的运行ID，并将之写入`sentinleState.myid`之中。
+2. 调用`sentinelGenerateInitialMonitorEvents`函数，为**Sentinel**所监控的每一个**Master**实例生成一个初始的监控事件。
+
+### Sentinel建立连接
+
+前面我们了解到，在**Sentinel**读取配置文件时所创建的`sentinelRedisInstance`对象后，实际上并没有与对应的**Master**建立网络连接。建立网络连接的过程实际上是由**Sentinel**的心跳机制负责的。
+
+```c
+void sentinelTimer(void);
+```
+
+上面这个函数负责整个**Sentinel**的心跳机制，这里我们主要来看一下其中所负责的建立网络连接的过程。
+
+而负责建立连接的是：
+
+```c
+void sentinelReconnectInstance(sentinelRedisInstance *ri);
+```
+
+这个函数会调用`redisAsyncConnectBind`函数来异步地建立网络连接，这里会分别建立两个网络连接，分别用于传输**Redis**的查询命令，以及用于订阅/发布**Redis**消息。
+
+
+
+建立连接的过程为。
 
 在*src/sentinel.c*源文件之中，定义了哨兵模式所需要的数据结构。
 
