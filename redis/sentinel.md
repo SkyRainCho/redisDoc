@@ -48,11 +48,11 @@ sentinel down-after-milliseconds mymaster 60000
 sentinel failover-time
 ```
 
-## Raft算法
+### Raft算法
 
 之所以在这里介绍**Raft**算法，是因为在故障迁移的过程之中，当**主从**集群之中的**Master**服务器下线时，负责监控这些**Redis**服务器的**Sentinel**集群便会应用**Raft**算法，从集群中的所有**Sentinel**服务器之中选举出一个**Leader**服务器，在由这个**Leader**服务器对**Master**服务器进行故障迁移的操作。在介绍**Raft**算法之前，我们先来看一下提出**Raft**算法的缘由，也就是分布式系统之中著名的**拜占庭将军问题**。
 
-### 拜占庭将军问题
+#### 拜占庭将军问题
 
 首先我们来看一下对于**拜占庭将军问题**的一个简要描述：
 
@@ -83,7 +83,7 @@ sentinel failover-time
 3. 其他将军收到投票请求后，如果还没有选自己作为领导人，那么便同意对方的投票请求，并告知对方；如果已经选择了自己作为领导人，或者已经同意了其他人的投票请求，那么便拒绝该投票请求，并告知对方
 4. 如果某一个将军收到了超过半数的投票，那么这个将军便会成为领导人；如果所有将军都没有收到过半数的投票，那么在下一轮倒计时结束之后，会重启开启一轮选举，直到选择出领导人。
 
-### Raft算法之节点
+#### Raft算法之节点
 
 在**Raft**算法之中每一个节点对应于**拜占庭将军问题**之中的一位将军，也对应于分布式系统之中的一台主机或者一个进程。节点一共拥有三种状态，**Follower**、**Candidate**、**Leader**，在这三种状态之中：
 
@@ -106,40 +106,48 @@ struct redisServer
 
 `redisServer.sentinel_mode`这个字段用于标记当前的*Redis*进程是否是哨兵模式，而后续的代码之中，我们将会看到，*Redis*程序正式通过这个字段进行判断，并执行哨兵模式的逻辑的。
 
+首先我们来简要地描述在哨兵模式之中，代码里所定义的相关结构体与用途。
+
+| 结构体对象类型          | 含义                                                         |
+| ----------------------- | ------------------------------------------------------------ |
+| `sentinelState`         | 用于存储**Sentinel**服务器在运行时所需要的数据，类似`redisServer`结构体。 |
+| `sentinelRedisInstance` | 表示一个**Sentinel**服务器在运行时所能感知的其他**Redis**服务器，可以是**Master**实例，可以是**Slave**实例，同样可以是其他的**Sentinel**实例。 |
+| `instanceLink`          | 用于表示**Sentinel**服务器与其他运行的**Redis**服务器实例之间的网络连接。 |
+| `sentinelAddr`          | 用于标记**Sentinel**服务器之中的地址信息数据。               |
+
+### sentinelState数据
+
 另外正如*Redis*会使用`redisServer`结构体来存储服务器在运行时所需要的数据，在哨兵实例之中也存在一个数据结构用于存储哨兵实例在运行时所需的必要数据：
 
 ```c
 struct sentinelState {
-    char myid[CONFIG_RUN_ID_SIZE+1]; /* This sentinel ID. */
-    uint64_t current_epoch;         /* Current epoch. */
-    dict *masters;      /* Dictionary of master sentinelRedisInstances.
-                           Key is the instance name, value is the
-                           sentinelRedisInstance structure pointer. */
-    int tilt;           /* Are we in TILT mode? */
-    int running_scripts;    /* Number of scripts in execution right now. */
-    mstime_t tilt_start_time;       /* When TITL started. */
-    mstime_t previous_time;         /* Last time we ran the time handler. */
-    list *scripts_queue;            /* Queue of user scripts to execute. */
-    char *announce_ip;  /* IP addr that is gossiped to other sentinels if
-                           not NULL. */
-    int announce_port;  /* Port that is gossiped to other sentinels if
-                           non zero. */
-    unsigned long simfailure_flags; /* Failures simulation. */
-    int deny_scripts_reconfig; /* Allow SENTINEL SET ... to change script
-                                  paths at runtime? */
+    char myid[CONFIG_RUN_ID_SIZE+1];
+    uint64_t current_epoch;
+    dict *masters;
+    int tilt;
+    int running_scripts;
+    mstime_t tilt_start_time;
+    mstime_t previous_time;
+    list *scripts_queue;
+    char *announce_ip;
+    int announce_port;
+    unsigned long simfailure_flags;
+    int deny_scripts_reconfig;
 } sentinel;
 ```
 
 在`sentinelState`这个数据结构之中最重要的字段便是`sentinelState.masters`这个哈希表，这里存储了当前这个哨兵实例所监控的**Master**实例。而这些被监控的实例，在哨兵模式之中是使用`sentinelRedisInstance`这个数据结构来表示的：
 
+### sentinelRedisInstance数据
+
 ```c
 typedef struct sentinelRedisInstance {
-    int flags;      /* See SRI_... defines */
-    char *name;     /* Master name from the point of view of this sentinel. */
-    char *runid;    /* Run ID of this instance, or unique ID if is a Sentinel.*/
-    uint64_t config_epoch;  /* Configuration epoch. */
-    sentinelAddr *addr; /* Master host. */
-    instanceLink *link; /* Link to the instance, may be shared for Sentinels. */
+    int flags;
+    char *name;
+    char *runid;
+    uint64_t config_epoch;
+    sentinelAddr *addr;
+    instanceLink *link;
     mstime_t last_pub_time;   /* Last time we sent hello via Pub/Sub. */
     mstime_t last_hello_time; /* Only used if SRI_SENTINEL is set. Last time
                                  we received a hello from this Sentinel
@@ -210,6 +218,32 @@ typedef struct sentinelRedisInstance {
    2. 如果这是一个**Slave**实例，则会记录对应**Master**实例的地址数据，以及复制偏移量等信息。
 3. 用于处理故障迁移的数据。
 
+#### 通用数据
+
+| 枚举定义                   | 含义                                                         |
+| -------------------------- | ------------------------------------------------------------ |
+| `SRI_MASTER`               | 表示这个`sentinelRedisInstance`对象代表一台**Master**服务器。 |
+| `SRI_SLAVE`                | 表示这个`sentinelRedisInstance`对象代表一台**Slave**服务器。 |
+| `SRI_SENTINEL`             | 表示这个`sentinelRedisInstance`对象代表一台**Sentinel**服务器。 |
+| `SRI_S_DOWN`               | 表示这个代表**Master**服务器的`sentinelRedisInstance`对象处于主观掉线的状态。 |
+| `SRI_O_DOWN`               | 表示这个代表**Master**服务器的`sentinelRedisInstance`对象处于客观掉线的状态。 |
+| `SRI_MASTER_DOWN`          |                                                              |
+| `SRI_FAILOVER_IN_PROGRESS` |                                                              |
+| `SRI_PROMOTED`             |                                                              |
+| `SRI_RECONF_SENT`          |                                                              |
+| `SRI_RECONF_INPROG`        |                                                              |
+| `SRI_RECONF_DONE`          |                                                              |
+| `SRI_FORCE_FAILOVER`       |                                                              |
+| `SRI_SCRIPT_KILL_SENT`     |                                                              |
+
+
+
+#### Master对应数据
+
+#### Slave对应数据
+
+#### 故障迁移对应数据
+
 现在我们总结一些，在一个哨兵实例之中，存在着三类不同作用的字典`dict`数据结构：
 
 1. `sentinelState.masters`，这里存储这个**Sentienl**服务器监控的所有的**Redis**的**Master**服务器。
@@ -217,6 +251,8 @@ typedef struct sentinelRedisInstance {
 3. `sentinelRedisInstance.slaves`，对于一个在**Sentinel**服务器进程之中表示**Master**服的对象，这个字典`dict`之中存储了这个**Master**对应的全部**Slave**服务器。通过这个字典，**Sentinel**服务器可以自动感知到所监控的**Master**服务器所对应的**Slave**服务器信息。
 
 而在哨兵模式之中，是使用`instanceLink`这个结构体来表示哨兵实例与被监控实例之间的连接信息：
+
+### instanceLink数据
 
 ```c
 typedef struct instanceLink {
@@ -434,8 +470,6 @@ void loadServerConfigFromString(char *config)
 {
   ...
 	else if (!strcasecmp(argv[0],"sentinel")) {
-	/* argc == 1 is handled by main() as we need to enter the sentinel
-	* mode ASAP. */
 		if (argc != 1) {
 			if (!server.sentinel_mode) {
 				err = "sentinel directive while not in sentinel mode";
@@ -493,65 +527,216 @@ void sentinelTimer(void);
 而负责建立连接的是：
 
 ```c
-void sentinelReconnectInstance(sentinelRedisInstance *ri);
+void sentinelReconnectInstance(sentinelRedisInstance *ri)
+{
+    if (ri->link->disconnected == 0) return;
+    ...
+}
 ```
 
-这个函数会调用`redisAsyncConnectBind`函数来异步地建立网络连接，这里会分别建立两个网络连接，分别用于传输**Redis**的查询命令，以及用于订阅/发布**Redis**消息。
+这个函数从函数名可以看出来，它的一个重要的用途便是用于对断开的网络连接进行重连操作。当然在**Sentinel**实例启动之后，这个函数也会负责为**Sentinel**所监控的每一个`sentinelRedisInstance`对象建立网络连接。这里会为每个`sentinelRedisInstance`建立两个网络连接，分别用于传输**Redis**的查询命令，以及用于订阅/发布**Redis**消息。
 
+#### 命令连接的建立
 
+**Sentinel**为一个`sentinelRedisInstance`建立命令连接的步骤是按照如下几步进行的：
 
-建立连接的过程为。
+1. 通过**Hiredis**之中异步建立连接的`redisAsyncConnectBind`函数，按照`sentinelRedisInstance`对象之中配置的地址信息，异步地建立网络连接。
+2. 初始化`sentinelRedisInstance`对象上的连接信息，包含`instanceLink.pending_commands`以及`instanceLink.cc_conn_time`信息。
+3. 通过`redisAeAttach`，将这个连接数据加入到**Redis**的主事件循环`redisServer.el`之中。
+4. 为这个异步连接设置连接建立的回调函数`sentinelLinkEstablishedCallback`以及断开连接的回调函数`sentinelDisconnectCallback`
+5. 调用`sentinelSendAuthIfNeeded`函数尝试进行认证，如果`sentinelRedisInstance`实例对应的**Redis**服务器需要进行密码认证，那么这个函数会通过`redisAsyncCommand`函数，发起一条异步的**AUTH**命令用于验证密码信息。
+6. 调用`sentinelSendPing`函数，异步地发起一条**PING**命令，并设置**PING**命令返回的回调函数`sentinelPingReplyCallback`。
 
-在*src/sentinel.c*源文件之中，定义了哨兵模式所需要的数据结构。
+不过需要注意的是，`sentinelReconnectInstance`函数在建立连接后所尝试发送**AUTH**命令以及**PING**命令均是异步流程，此时并没有真正地发送出去，要等到连接正式建立之后，才会真正地将命令数据发送到网络上。
+
+#### 订阅连接的建立
+
+`sentinelRedisInstance`对象订阅连接的建立过程与命令连接的建立过程相似，不同之处在于建立订阅连接不会清空`instanceLink.pending_commands`字段上的计数；同时在`sentinelSendAuthIfNeeded`认证完密码之后，**Sentinel**还会向`sentinelRedisInstance`对象对应的**Redis**服务器发送**SUBSCRIBE**命令，订阅该**Redis**服务器上的`__sentinel__:hello`这个频道的消息，并设置订阅消息的回调函数`sentinelReceiveHelloMessages`。
+
+### Sentinel的服务发现机制
+
+通过前面的介绍，以及代码之中提供的**Sentinel**默认配置文件，我们不难发现我们仅可以配置**Sentinel**实例监控的**Master**服务器的信息，并没有对应**Slave**服务器的信息，以及**Sentinel**分布式集群之中其他**Sentinel**实例的信息。那么在这一部分将会介绍一台**Sentinel**实例是如何发现其他的**Slave**服务器以及**Sentinel**服务器的。
+
+与建立与`sentinelRedisInstance`对象对应的**Redis**服务器的网络连接的机制一样，**Sentinel**实例的服务发现机制也是心跳`sentinelTimer`之中完成的。
+
+在**Sentinel**的心跳机制之中，会遍历系统之中的每一个`sentinelRedisInstance`对象，调用`sentinelSendPeriodicCommands`函数，向该对象所对应的**Redis**服务器发送周期性命令，这其中包括：
+
+1. 向所有非`SRI_SENTINEL`对象发送**INFO**命令。
+2. 向所有的`sentinelRedisInstance`对象发送**PING**命令。
+3. 向所有的`sentinelRedisInstance`对象的`__sentinel__:hello`频道上发布**Hello**信息。
+
+#### Slave服务器的发现机制
+
+**Sentinel**服务器会在`sentinelSendPeriodicCommands`函数之中向所有的非`SRI_SENTINEL`类型的`sentinelRedisInstance`对象发送**INFO**命令，通过这个机制，**Sentinel**实现了对**Slave**服务器的自动发现。我们先来看一下针对一个**Master**服务器发送**INFO**命令后的返回数据：
+
+```
+# Server
+...
+multiplexing_api:epoll
+atomicvar_api:atomic-builtin
+gcc_version:4.8.5
+process_id:31734
+run_id:2f2a6b4e4097fa114630d4e7370bd33c914e37af
+...
+# Replication
+role:master
+connected_slaves:1
+slave0:ip=10.236.192.20,port=6379,state=online,offset=2596808391,lag=0
+master_replid:1c1b0f14e1207ca9b2c54627bcf709fdb27967dd
+master_replid2:0000000000000000000000000000000000000000
+master_repl_offset:2596808391
+second_repl_offset:-1
+repl_backlog_active:1
+repl_backlog_size:1048576
+repl_backlog_first_byte_offset:2595759816
+repl_backlog_histlen:1048576
+...
+```
+
+同时我们可以来看一下对于一个**Slave**服务器执行**INFO**命令之后的返回信息：
+
+```
+# Server
+...
+run_id:b9fd714edd72716912d18adcd8e12bd0955dfffc
+...
+# Replication
+role:slave
+master_host:10.236.100.244
+master_port:6379
+master_link_status:up
+master_last_io_seconds_ago:2
+master_sync_in_progress:0
+slave_repl_offset:2597448187
+slave_priority:100
+slave_read_only:1
+connected_slaves:0
+master_replid:1c1b0f14e1207ca9b2c54627bcf709fdb27967dd
+master_replid2:0000000000000000000000000000000000000000
+master_repl_offset:2597448187
+second_repl_offset:-1
+repl_backlog_active:1
+repl_backlog_size:1048576
+repl_backlog_first_byte_offset:2596399612
+repl_backlog_histlen:1048576
+...
+```
+
+这里我们可以看到**INFO**命令返回数据中包含了主从集群的各项配置信息以及数据，**Sentinel**则是通过`sentinelRefreshInstanceInfo`这个函数读取**INFO**命令的返回来实现对于**Slave**服务器的发现的。
 
 ```c
-typedef struct instanceLink {
-    int refcount;          /* Number of sentinelRedisInstance owners. */
-    int disconnected;      /* Non-zero if we need to reconnect cc or pc. */
-    int pending_commands;  /* Number of commands sent waiting for a reply. */
-    redisAsyncContext *cc; /* Hiredis context for commands. */
-    redisAsyncContext *pc; /* Hiredis context for Pub / Sub. */
-    mstime_t cc_conn_time; /* cc connection time. */
-    mstime_t pc_conn_time; /* pc connection time. */
-    mstime_t pc_last_activity; /* Last time we received any message. */
-    mstime_t last_avail_time; /* Last time the instance replied to ping with
-                                 a reply we consider valid. */
-    mstime_t act_ping_time;   /* Time at which the last pending ping (no pong
-                                 received after it) was sent. This field is
-                                 set to 0 when a pong is received, and set again
-                                 to the current time if the value is 0 and a new
-                                 ping is sent. */
-    mstime_t last_ping_time;  /* Time at which we sent the last ping. This is
-                                 only used to avoid sending too many pings
-                                 during failure. Idle time is computed using
-                                 the act_ping_time field. */
-    mstime_t last_pong_time;  /* Last time the instance replied to ping,
-                                 whatever the reply was. That's used to check
-                                 if the link is idle and must be reconnected. */
-    mstime_t last_reconn_time;  /* Last reconnection attempt performed when
-                                   the link was down. */
-} instanceLink;
+void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info);
 ```
 
+如果对于一个`SRI_MASTER`类型的`sentinelRedisInstance`对象，这个函数会从**INFO**命令的返回数据之中读取出对应的**SLAVE**服务器的连接信息。并使用从中解析出来的`ip`以及`port`信息，在`SRI_MASTER`的`sentinelRedisInstance.slaves`这个字典之中查找是否存在对应**SLAVE**服务器的`sentinelRedisInstance`对象，如果不存在就通过`createSentinelRedisInstance`函数创建一个表示对应**SLAVE**服务器的`sentinelRedisInstance`对象，并将其加入到对应**Master**服务器的`sentinelRedisInstance.slaves`字段之中。
 
+通过这样一个机制，**Sentinel**服务器可以自动发现**Master**服务器对应的**Slave**服务器。
 
-在*src/server.h*之中定义了接口函数：
+另外，针对一个**SLAVE**对象定期执行**INFO**命令后，通过命令返回的信息，可以用于设置以及更新对应的`sentinelRedisInstance`结构体之中关于**SLAVE**服务器的相关数据字段。
+
+#### Sentinel服务器的发现机制
+
+监控同一个**Master**服务器的**Sentinel**服务器是通过**Redis**的发布/订阅机制来实现相互发现的。简要而言，**Sentinel**服务器在建立与**Master**服务器的连接之后，会订阅**Master**服务器的`__sentinel__:hello`频道；**Sentinel**服务器会周期性地向所监控的**Master**服务器的`__sentinel__:hello`频道发布**Hello**消息，这条**Hello**消息会通报这个**Sentinel**服务器的ip地址、端口号、运行ID等参数信息，以及对应这个**Master**的参数信息。这样一来，这个**Sentinel**的这条**Hello**消息就可以被监控同一个**Master**的其他所有**Sentinel**服务器接收，如此一来这个**Sentinel**集群便可以实现彼此之间的相互发现。
 
 ```c
-void initSentinelConfig(void);
-void initSentinel(void);
-void sentinelTimer(void);
-char *sentinelHandleConfiguration(char **argv, int argc);
-void sentinelIsRunning(void);
+void sentinelProcessHelloMessage(char *hello, int hello_len);
 ```
 
-重置一个被监视的**Master**实例的状态，
+**Sentinel**便是通过上面这个`sentinelProcessHelloMessage`函数实现对订阅频道之中接收到的**Hello**信息的处理的。我们可以首先看一下，**Hello**消息的具体内容：
 
-实例之间进行交互的接口：
+```
+"message"
+"__sentinel__:hello"
+"127.0.0.1,26379,0ff83f9b554269ce614f4e792aa5169eeb444f21,0,mymaster,127.0.0.1,6379,0"
+```
+
+在这条消息之中，各个字段数据的含义为：
+
+```
+<sentinel_ip>,<sentinel_port>,<sentinel_runid>,<current_epoch>, <master_name>,<master_ip>,<master_port>,<master_config_epoch>
+```
+
+`sentinelProcessHelloMessage`这个函数发现其他**Sentinel**的逻辑为：
+
+1. 调用`sentinelGetMasterByName`函数，根据`<master_name>`查找该**Master**对应的`sentinelRedisInstance`的对象。
+2. 调用`getSentinelRedisInstanceByAddrAndRunID`函数，根据`<sentinel_ip>`、`<sentinel_port>`以及`<seninel_runid>`在**Master**的`sentinelRedisInstance.sentinels`字典之中查找对对应的**Sentinel**的`sentinelRedisInstance`对象。此处的查找必须做到地址、端口、运行ID完全匹配才返回对应的对象。
+3. 如果没有找到对应的**Sentinel**对对象，那么根据**Hello**消息之中通告的参数信息，调用`createSentinelRedisInstance`创建一个`SRI_SENTINEL`类型的对象，并将其添加到对应**Master**的`sentinelRedisInstance.sentinels`字典之中。
+4. 通过`sentinelTryConnectionSharing`函数，尝试共享底层网络连接的`instanceLink`数据。后面我们会介绍为什么需要共享网络连接。
+5. 更新数据
+6. 在后续心跳之中，通过`sentinelReconnectInstance`建立网络连接。
+
+除此之外，每当**Sentinel**服务器从订阅连接上接收到消息进而触发`sentinelReceiveHelloMessages`回调函数时，会更新`instanceLink.pc_last_activity`这个时间戳，用于后续检测订阅连接可用性的依据。
+
+##### 共享网络连接
+
 ```c
-void sentinelEvent(int level, char *type, sentinelRedisInstance *ri, const char *fmt, ...);
+void sentinelReconnectInstance(sentinelRedisInstance *ri)
+{
+    ...
+    instanceLink *link = ri->link;
+    ...
+    if (link->cc == NULL)
+    {
+        link->cc = redisAsyncConnectBind(ri->addr->ip,ri->addr->port,NET_FIRST_BIND_ADDR);
+        ...
+    }
+    
+    if ((ri->flags & (SRI_MASTER|SRI_SLAVE)) && link->pc == NULL)
+    {
+        link->pc = redisAsyncConnectBind(ri->addr->ip,ri->addr->port,NET_FIRST_BIND_ADDR);
+        ...
+    }
+}
 ```
-这个函数主要用于将一些消息通过**发布/订阅**连接发送给指定的`sentinelRedisInstance`对象所代码的实例。这里`level`用于标记通知消息的等级，当我们发送`LL_WARNING`等级的消息时，将会触发前面介绍用户通知的脚本。
+
+在上述的`sentinelReconnectInstance`函数的代码片段之中，我们可以发现如果**Sentinel**服务器尝试向另外一个代表**Sentinel**的`sentinelRedisInstance`建立连接时，只会创建命令连接，而不会创建订阅连接。也就是说**Sentinel**集群之中的服务器节点彼此之间只有一个命令连接。
+
+而这个特性便是前面所说的共享底层网络连接的由来。设想我们有**SentinelA**以及**SentinelB**两个服务器，监控**Master1**以及**Master2**两个服务器。当**SentinelA**通过**Master1**发现了**SentinelB**之后，为**SentinelB**创建一个`sentinelRedisInstance`对象，并通过这个对象建立与**SentinelB**服务器的底层网络连接；后续**SentinleA**又通过**Master2**发现了**SentinelB**，但是此前两台服务器之间已经建立了一条网络连接，我们没有必要为两个服务器再建立一条网络连接，基于这个理由，我们便可以再新的`sentinelRedisInstance`对象上，复用前面已经创建好的网络连接`instanceLink`。
+
+### 故障发现
+
+前面在介绍**Sentinel**的服务器发现机制时，我们提到过，**Sentinel**会在心跳之中周期性调用`sentinelSendPing`函数向其所连接的所有包括**Master**、**Slave**、**Sentinel**服务器发送**PING**探测命令，并通过注册回调函数`sentinelPingReplyCallback`来处理返回信息。
+
+上述这套机制的用于是通过发送**PING**命令以及处理命令的返回数据来刷新对应网络连接`instanceLink`的计时时间戳，用于后续检测连接状态。这其中所涉及到的`instanceLink`中的计时器包括：
+
+1. `instanceLink.last_avail_time`，用于记录对应的**Redis**服务器实例上一次的可用时间，每次收到**PING**命令的返回时，会刷新该时间戳数据。
+2. `instanceLink.act_ping_time`，用记录执行**PING**命令的时间戳，每次发送**PING**命令时被设置，收到**PING**命令返回后，这个时间戳记录会被清零。
+3. `instanceLink.last_ping_time`，记录上一次执行**PING**命令的时间戳，每次发送**PING**命令后，会更新该时间戳。
+4. `instanceLink.last_pong_time`，记录上一次收到**PING**命令返回的时间戳，每次在`sentinelPingReplyCallback`回调函数之中会更新该字段。
+
+而**Sentinel**服务器检测其所连接的其他的**Redis**服务器的状态则是在心跳机制之中通过调用`sentinelCheckSubjectivelyDown`这个函数实现的。
+
+```c
+void sentinelCheckSubjectivelyDown(sentinelRedisInstance *ri);
+```
+
+该函数会检查对应的`sentinelRedisInstance`对象网络连接的可用性，并更新该对象的状态。
+
+首先`sentinelCheckSubjectivelyDown`函数会检查命令连接`instanceLink.cc`的可用状态，如果已经向该`sentinelRedisInstance`对应的**Redis**服务器发送过**PING**命令，也就是`instanceLink.act_ping_time`上的时间戳不为0；同时在配置项`down-after-milliseconds`规定的一半的时间内没有收到对方的返回数据时，那么便认为这个对象的命令连接已经掉线，会调用`instanceLinkCloseConnection`函数关闭这个对象上的命令连接。
+
+接下来`sentinelCheckSubjectivelyDown`会检查对应的订阅连接`instanceLink.pc`的可用状态。主要检查截止上一次从订阅连接上接收到消息的时间`instanceLink.pc_last_activity`，如果超过三倍的`SENTINEL_PUBLISH_PERIOD`时间没有接收到新的消息，那么便认为这条订阅连接掉线，调用`instanceLinkCloseConnection`函数关闭这个对象上的订阅连接。
+
+### 故障迁移
+
+
+
+### 配置回写
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ***
 ![公众号二维码](https://machiavelli-1301806039.cos.ap-beijing.myqcloud.com/qrcode_for_gh_836beef2355a_344.jpg)
