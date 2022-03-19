@@ -83,13 +83,15 @@ sentinel failover-time
 3. 其他将军收到投票请求后，如果还没有选自己作为领导人，那么便同意对方的投票请求，并告知对方；如果已经选择了自己作为领导人，或者已经同意了其他人的投票请求，那么便拒绝该投票请求，并告知对方
 4. 如果某一个将军收到了超过半数的投票，那么这个将军便会成为领导人；如果所有将军都没有收到过半数的投票，那么在下一轮倒计时结束之后，会重启开启一轮选举，直到选择出领导人。
 
-#### Raft算法之节点
+#### Raft算法之节点角色
 
 在**Raft**算法之中每一个节点对应于**拜占庭将军问题**之中的一位将军，也对应于分布式系统之中的一台主机或者一个进程。节点一共拥有三种状态，**Follower**、**Candidate**、**Leader**，在这三种状态之中：
 
 1. **Follower**节点，初始状态下所有的节点都是**Follower**状态。每个**Follower**节点有一个随机时间的计时器，倒计时结束时，如果没有收到其他节点的投票请求，那么会将自己转化为**Candidate**节点，并向其他节点发送投票请求。
 2. **Candidate**节点会等待其他节点的投票返回，如果该**Candidate**收到了过半数的确认投票后，会将自己升级为**Leader**节点，在一个分布式系统之中允许存在多个**Candidate**节点。
 3. **Leader**节点则负责整个集群的决策选择。
+
+每个**Raft**节点都有一个任期`Term`，在**Raft**集群刚刚启动时，每个节点的`Term`均为0。同时每个节点都有一个随机时间的倒计时计时器，每次节点的倒计时器结束倒计时的时候，便会将自己的任期`Term`加一。
 
 ## 哨兵模式相关数据结构
 
@@ -227,8 +229,8 @@ typedef struct sentinelRedisInstance {
 | `SRI_SENTINEL`             | 表示这个`sentinelRedisInstance`对象代表一台**Sentinel**服务器。 |
 | `SRI_S_DOWN`               | 表示这个代表**Master**服务器的`sentinelRedisInstance`对象处于主观掉线的状态。 |
 | `SRI_O_DOWN`               | 表示这个代表**Master**服务器的`sentinelRedisInstance`对象处于客观掉线的状态。 |
-| `SRI_MASTER_DOWN`          |                                                              |
-| `SRI_FAILOVER_IN_PROGRESS` |                                                              |
+| `SRI_MASTER_DOWN`          | 表示某个代表**Sentinel**服务器的`sentineRedisInstance`对象，其所监控的**Master**处于掉线状态。 |
+| `SRI_FAILOVER_IN_PROGRESS` | 只会设置给`SRI_MASTER`的对象，表示这个对象正在进行故障迁移   |
 | `SRI_PROMOTED`             |                                                              |
 | `SRI_RECONF_SENT`          |                                                              |
 | `SRI_RECONF_INPROG`        |                                                              |
@@ -704,7 +706,9 @@ void sentinelReconnectInstance(sentinelRedisInstance *ri)
 3. `instanceLink.last_ping_time`，记录上一次执行**PING**命令的时间戳，每次发送**PING**命令后，会更新该时间戳。
 4. `instanceLink.last_pong_time`，记录上一次收到**PING**命令返回的时间戳，每次在`sentinelPingReplyCallback`回调函数之中会更新该字段。
 
-而**Sentinel**服务器检测其所连接的其他的**Redis**服务器的状态则是在心跳机制之中通过调用`sentinelCheckSubjectivelyDown`这个函数实现的。
+#### 主观下线
+
+**Sentinel**服务器检测其所连接的其他的**Redis**服务器的是否处于**主观下线**状态则是在心跳机制之中通过调用`sentinelCheckSubjectivelyDown`这个函数实现的。
 
 ```c
 void sentinelCheckSubjectivelyDown(sentinelRedisInstance *ri);
@@ -716,9 +720,132 @@ void sentinelCheckSubjectivelyDown(sentinelRedisInstance *ri);
 
 接下来`sentinelCheckSubjectivelyDown`会检查对应的订阅连接`instanceLink.pc`的可用状态。主要检查截止上一次从订阅连接上接收到消息的时间`instanceLink.pc_last_activity`，如果超过三倍的`SENTINEL_PUBLISH_PERIOD`时间没有接收到新的消息，那么便认为这条订阅连接掉线，调用`instanceLinkCloseConnection`函数关闭这个对象上的订阅连接。
 
+在完成了对于命令连接以及订阅连接的检查后，**Sentinel**便会对该`sentinelRedisInstance`对象的在线状态进行判断。如果这个`sentinelRedisInstance`对象超过`down-after-milliseconds`时间没有接收到**PING**命令的返回，或者已经因为异常而断开网络连接超过`down-after-milliseconds`没有重新建立间接，便将其设置为**主观下线**的状态。这会在`sentinelRedisInstance.flags`字段上设置`SRI_S_DOWN`掩码用于标记。
+
+#### 客观下线
+
+**主观下线**可能只是该**Sentinel**与对应的**Redis**服务器之间的网络连接出现波动，并不一定意味着对应的**Redis**服务器真的出现故障下线，因此**Sentinel**服务器需要从其他的**Sentinel**服务器中获取信息，用于判断究竟是**Redis**服务器真的出现问题，还是仅仅是当前**Sentinel**与对应的**Redis**服务器出现网络波动。
+
+**Sentinel**服务器会在心跳机制之中，针对每一个代表**Master**服务器的`sentinelRedisInstance`对象执行状态查询以及**客观下线**的判断：
+
+```c
+void sentinelHandleRedisInstance(sentinelRedisInstance *ri)
+{
+  ...
+	if (ri->flags & SRI_MASTER)
+  {
+		sentinelCheckObjectivelyDown(ri);
+		...
+		sentinelAskMasterStateToOtherSentinels(ri,SENTINEL_NO_FLAGS);
+	} 
+}
+```
+
+##### 状态询问
+
+所谓查询**Master**服务器的状态，就是向同样监控该**Master**服务器的**Sentinel**服务器发起状态查询请求，用于确定该**Master**服务器的状态。**Sentinel**服务器之中执行状态查询的逻辑主要在下面三个函数接口之中：
+
+```c
+void sentinelAskMasterStateToOtherSentinels(sentinelRedisInstance *master, int flags);
+void sentinelReceiveIsMasterDownReply(redisAsyncContext *c, void *reply, void *privdata);
+void sentinelCommand(client *c);
+```
+
+首先我们会调用`sentinelAskMasterStateToOtherSentinels`函数，如果`master`对象处于`SRI_S_DOWN`这个**客观下线**的状态，那么会遍历对应**Master**的`sentinelRedisInstance.sentinels`这个字典数据之中的每一个代表**Sentinel**服务器的`sentinelRedisInstance`对象，向其对应的**Sentinel**服务器发起**SENTINEL**查询命令，同时注册命令返回数据的回调处理函数`sentinelReceiveIsMasterDownReply`，查询命令的格式为：
+
+```
+SENTINEL is-master-down-by-addr <master-ip> <master-port> <current-epoch> <runid>
+```
+
+此时由于**Master**服务器仅仅是**主观下线**的状态，因此**SENTINEL**命令之中，`<runid>`所携带的参数并非是当前**Sentinel**的运行ID，而是特殊符号`*`。
+
+对应的**Sentinel**服务器在收到查询命令时，则会通过`sentinelCommand`函数来处理这条特殊的**SENTINEL**查询命令。`sentinelCommand`函数会根据命令参数之中的`master-ip`以及`master-port`查找到对应的**Master**的`sentinelRedisInstance`对应，检查该对象是也处于`SRI_S_DOWN`这个**主观下线**的状态，并将这个状态返回给发起查询请求的**Sentinel**服务器。
+
+**Sentinel**服务器接收到其他**Sentinel**服务器的**SENTINEL**命令返回数据后，会触发`sentinelReceiveIsMasterDownReply`回调函数。在`sentinelReceiveIsMasterDownReply`函数中如果返回该**Master**服务器**主观下线**，那么会将代表该**Sentinel**的`sentinelRedisInstance`对象的`flags`字段设置上`SRI_MASTER_DOWN`，表示这个**Sentinel**实例也认为这个**Master**下线，算作一次投票。
+
+##### 客观下线判断
+
+**Sentinel**服务器会在心跳机制之中，通过一下调用`sentinelCheckObjectivelyDown`函数来检查一个**Master**服务器是否从**主观下线**转为**客观下线**。
+
+如果一个**Master**服务器的`sentinelRedisInstance`对象的`flags`对象具有`SRI_S_DOWN`掩码，那么**Sentinel**就会遍历这个**Master**的`sentinelRedisInstance.sentinels`字典中的每一个`SRI_SENTINEL`类型的`sentinelRedisInstance`对象。统计其中具有`SRI_MASTER_DOWN`掩码的对象的个数，如果这个数量超过了配置文件之中配置的最低票数，那么便认为这个**Master**服务器处于**客观下线**的状态。
+
+一旦**Sentinel**服务器认为某个**Master**服务器处于**客观下线**的状态，那么这个**Sentinel**便会用于**Raft**算法对该故障的**Master**服务器执行故障迁移的逻辑。
+
 ### 故障迁移
 
+**Sentinel**会在心跳之中检查其所监控的**Master**服务器是否处于**客观下线**的状态需要进行故障迁移。
 
+```c
+void sentinelHandleRedisInstance(sentinelRedisInstance *ri)
+{
+  ...
+  /* Only masters */
+	if (ri->flags & SRI_MASTER)
+	{
+		sentinelCheckObjectivelyDown(ri);
+		if (sentinelStartFailoverIfNeeded(ri))
+			sentinelAskMasterStateToOtherSentinels(ri,SENTINEL_ASK_FORCED);
+		...
+	}
+}
+```
+
+这里**Sentinel**会通过`sentineStartFailoverIfNeeded`函数来判断对应的**Master**节点实例`ri`是否需要进行故障迁移。其判断的策略为：
+
+1. **Master**服务器对应的实例必须处于**客观下线**状态。
+2. 没有正在进行的故障迁移
+3. 最近没有正在尝试的故障迁移流程。
+
+如果通过判断，确认该**Master**需要进行故障迁移，那么便会通过`sentinelStartFailover`函数开启故障迁移流程：
+
+```c
+void sentinelStartFailover(sentinelRedisInstance *master);
+```
+
+这个函数会执行如下的逻辑：
+
+1. 为**Master**对应的`sentinelRedisInstance`对象的`sentinelRedisInstance.flags`字段上添加`SRI_FAILOVER_IN_PROGRESS`掩码，表示这个**Master**实例正在进行故障迁移；将`sentinelRedisInstance.failover_state`字段设置为`SENTINEL_FAILOVER_STATE_WAIT_START`，表示当前正在等待故障迁移正式开始
+2. 将**Sentinel**的当前纪元`sentinelState.current_epoch`加一，并将之赋值给**Master**实例的`sentinelRedisInstance.failover_epoch`字段上。
+3. 设置**Master**实例上的故障迁移相关时间戳，包括`sentinelRedisInstance.failover_start_time`以及`sentinelRedisInstance.failover_state_change_time`。
+
+#### 选择Leader
+
+在**Sentinel**为对应的**Master**对象开启了故障迁移流程之后，首先要做的便是基于**Raft**算法进行选举Leader的过程了，这一步是通过`sentinelAskMasterStateToOtherSentinels`函数进行的。前面我们在介绍检查**Master**是否**客观下线**时，便是通过这个函数向监控相同**Master**的其他**Sentinel**发送**SENTINEL**命令来查询对应**Master**的状态的，
+
+```
+SENTINEL is-master-down-by-addr <master-ip> <master-port> <current-epoch> <runid>
+```
+
+开启选择Leader的过程也是通过上面这个格式的命令来开启的，只不过`<runid>`这一项在这种情况下会发送**Sentinel**的运行ID。
+
+```c
+void sentinelCommand(client *c)
+{
+  ...
+  if (!strcasecmp(c->argv[1]->ptr,"is-master-down-by-addr"))
+  {
+    ...
+    if (ri && ri->flags & SRI_MASTER && strcasecmp(c->argv[5]->ptr,"*"))
+    {
+      leader = sentinelVoteLeader(ri,(uint64_t)req_epoch, c->argv[5]->ptr, &leader_epoch);
+    }
+    ...
+  }
+  ...
+}
+```
+
+这里我们可以看到，如果对应`<runid>`这一项为正常的运行ID的话，便会调用`SentinelVoteLeader`函数进行选择Leader：
+
+```c
+char *sentinelVoteLeader(sentinelRedisInstance *master, uint64_t req_epoch, char *req_runid, uint64_t *leader_epoch);
+```
+
+这个函数会接收请求投票的**Sentinel**服务器对应的请求纪元`req_epoch`以及该**Sentinel**的运行ID `req_runid`，接下来`sentinelVoteLeader`函数便会按照**Raft**算法的相关规则，进行投票。其规则为：
+
+1. 如果请求
+
+#### 故障迁移
 
 ### 配置回写
 
