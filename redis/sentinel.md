@@ -246,7 +246,13 @@ typedef struct sentinelRedisInstance {
 
 #### 故障迁移对应数据
 
-现在我们总结一些，在一个哨兵实例之中，存在着三类不同作用的字典`dict`数据结构：
+1. `sentinelRedisInstance.leader`，如果对应一个表示**Master**的对象，这里记录应该执行的故障转移，也就是**Leader**的运行ID；如果对应一个表示**Sentinel**的对象，那么这里记录的是这个对象把选票投给了哪个**Sentinel**作为**Leader**
+2. `sentinelRedisInstance.leader_epoch`，对应**Leader**的纪元。
+3. `sentinelRedisInstance.failover_epoch`
+4. `sentinelRedisInstance.failover_state`
+5. `sentinelRedisInstance.leader`
+
+现在我们总结一下，在一个哨兵实例之中，存在着三类不同作用的字典`dict`数据结构：
 
 1. `sentinelState.masters`，这里存储这个**Sentienl**服务器监控的所有的**Redis**的**Master**服务器。
 2. `sentinelRedisInstance.sentinels`，对于一个在**Sentinel**服务器进程之中表示**Master**服的对象，这个字典`dict`之中存储了监控这个**Master**的所有的**Sentinel**服务器的`sentinelRedisInstance`对象。通过这个字典，一个**Sentinel**服务器可以自动感知到监控同一**Master**的其他**Sentinel**服务器。
@@ -810,6 +816,8 @@ void sentinelStartFailover(sentinelRedisInstance *master);
 
 #### 选择Leader
 
+##### 发起选举
+
 在**Sentinel**为对应的**Master**对象开启了故障迁移流程之后，首先要做的便是基于**Raft**算法进行选举Leader的过程了，这一步是通过`sentinelAskMasterStateToOtherSentinels`函数进行的。前面我们在介绍检查**Master**是否**客观下线**时，便是通过这个函数向监控相同**Master**的其他**Sentinel**发送**SENTINEL**命令来查询对应**Master**的状态的，
 
 ```
@@ -843,11 +851,98 @@ char *sentinelVoteLeader(sentinelRedisInstance *master, uint64_t req_epoch, char
 
 这个函数会接收请求投票的**Sentinel**服务器对应的请求纪元`req_epoch`以及该**Sentinel**的运行ID `req_runid`，接下来`sentinelVoteLeader`函数便会按照**Raft**算法的相关规则，进行投票。其规则为：
 
-1. 如果请求
+1. 如果请求纪元`req_epoch`大于当前**Sentinel**的当前纪元`sentinelState.current_epoch`，那么用请求纪元来替换**Sentinel**的当前纪元。
+1. 如果当前**Sentinel**监控的**Master**实例的记录的**Leade**纪元`sentinelRedisInstance.leader_epoch`小于请求纪元`req_epoch`，并且**Sentinel**的当前纪元`sentinelState.current_epoch`不大于请求纪元`req_epoch`的话，那么这个**Sentinel**便会为发起请求的**Sentinel**投票，选举它作为**Leader**，同时将投票记录更新到**Master**服务器对应的`sentinelRedisInstance`对象上。这样一来可以防止该**Sentinel**重复地进行投票。
+1. 最后，无论是否响应了投票请求与否，**Sentinel**都会将当前记录的`sentinelRedisInstance.leader`这个**Leader**运行ID，以及`leader_epoch`做为**SENTINEL**命令的返回发送给请求一方的**Sentinel**服务器。
+
+```
+<down-state> <leader-runid> <vote-epoch>
+```
+
+发起投票请求的**Sentinel**服务器在接收到返回数据后，会通过`sentinelReceiveIsMasterDownReply`函数来处理返回数据：
+
+```c
+void sentinelReceiveIsMasterDownReply(redisAsyncContext *c, void *reply, void *privdata)
+{
+  sentinelRedisInstance *ri = privdata;
+  ...
+  if (strcmp(r->element[1]->str,"*"))
+  {
+    ri->leader = sdsnew(r->element[1]->str);
+    ri->leader_epoch = r->element[2]->integer;
+  }
+}
+```
+
+这里如果返回数据之中的`<leader-runid>`不是特殊的`*`，那么便认为对方已经在选举之中进行了投票，并将投票结果赋值给代表响应方**Sentinel**的对象。
+
+##### 确定Leader
+
+接下来**Sentinel**服务器便会在心跳之中，通过状态机函数来处理确定**Leader**的逻辑：
+
+```c
+void sentinelFailoverStateMachine(sentinelRedisInstance *ri);
+```
+
+前面我们介绍了，在**Sentinel**为一个**Master**服务器开启故障迁移流程后，会首先将这个**Master**对象上的故障迁移状态`failover_state`设置成`SENTINEL_FAILOVER_STATE_WAIT_START`，表示其在等待**Sentinel**集群选出**Leader**来正式开始故障迁移流程。在状态机迁移函数`sentinelFailoverStateMachine`之中，当发现实例处于`SENTINEL_FAILOVER_STATE_WAIT_START`状态，那么将会调用`sentinelFailoverWaitStart`函数来检测是否已经选举出负责此次故障迁移的**Leader**服务器。
+
+```c
+void sentinelFailoverWaitStart(sentinelRedisInstance *ri);
+char *sentinelGetLeader(sentinelRedisInstance *master, uint64_t epoch);
+int sentinelLeaderIncr(dict *counters, char *runid);
+```
+
+上述三个函数的主要逻辑便是确定在当前的选举过程之中，是否已经选举出了**Leader**服务器节点。这其中`sentinelLeaderIncr`函数用于向`counters`这个统计数据之中增加给定`runid`的**Sentinel**服务器实例在选举**Leader**之中所获得的投票数，这个统计数据将最终用于确定**Leader**服务器。
+
+而函数`sentinelGetLeader`则是会按照指定的纪元`epoch`在给定的**Master**服务器对象所绑定的**Sentinel**服务器对象之中扫描是否存在已经被选出的**Leader**。
+
+首先`sentinelGetLeader`函数会遍历的**Master**对象的`sentinelRedisInstance.sentinels`字典之中监控该**Master**的所有**Sentinel**实例，收集各个**Sentinel**对象的得票情况，同时通过`sentinelRedisInstance.leader_epoch`与`sentinelState.current_epoch`比较来确保收集到的都是针对当前的**客观下线**而进行的投票。
+
+接下来`sentinelGetLeader`会查找得票最多的**Sentinel**对象，如果找到，那么将自己的一票投给得票最高的**Sentinel**对象，否则便投票给自己。
+
+```c
+void sentinelHandleRedisInstance(sentinelRedisInstance *ri)
+{
+  ...
+	if (ri->flags & SRI_MASTER) {
+		sentinelCheckObjectivelyDown(ri);
+		if (sentinelStartFailoverIfNeeded(ri))
+			sentinelAskMasterStateToOtherSentinels(ri,SENTINEL_ASK_FORCED);
+		sentinelFailoverStateMachine(ri);
+		sentinelAskMasterStateToOtherSentinels(ri,SENTINEL_NO_FLAGS);
+	}
+}
+```
+
+回看处理`sentinelRedisInstance`对象的心跳逻辑的代码片段，这里可以保证如果一个**Sentinel**服务器率先发现自己所监控的**Master**服务器**客观下线**，那么它会优先投票给自己。这也印证**Raft**算法投票逻辑之中，当一个**Follower**节点的倒计时器结束时，如果没有投票给其他节点，那么便会投票给自己。
+
+最后`sentinelGetLeader`函数会检查得票最高的**Sentinel**对象的票数是否过半，如果过半说明该对象便是最终选出的**Leader**，函数返回该对象的运行ID；否则说明暂时没有完成投票，那么会在下一次心跳之中继续调用该接口扫描是否选出了**Leader**。
 
 #### 故障迁移
 
 ### 配置回写
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
