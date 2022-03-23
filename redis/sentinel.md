@@ -231,7 +231,7 @@ typedef struct sentinelRedisInstance {
 | `SRI_O_DOWN`               | 表示这个代表**Master**服务器的`sentinelRedisInstance`对象处于客观掉线的状态。 |
 | `SRI_MASTER_DOWN`          | 表示某个代表**Sentinel**服务器的`sentineRedisInstance`对象，其所监控的**Master**处于掉线状态。 |
 | `SRI_FAILOVER_IN_PROGRESS` | 只会设置给`SRI_MASTER`的对象，表示这个对象正在进行故障迁移   |
-| `SRI_PROMOTED`             |                                                              |
+| `SRI_PROMOTED`             | 只会设置给`SRI_SLAVE`对象，表示在故障迁移流程之中，这个**Slave**服务器被**Sentinel**选择将会提升为**Master**服务器。 |
 | `SRI_RECONF_SENT`          |                                                              |
 | `SRI_RECONF_INPROG`        |                                                              |
 | `SRI_RECONF_DONE`          |                                                              |
@@ -251,6 +251,7 @@ typedef struct sentinelRedisInstance {
 3. `sentinelRedisInstance.failover_epoch`
 4. `sentinelRedisInstance.failover_state`
 5. `sentinelRedisInstance.leader`
+6. `sentinelRedisInstance.promoted_slave`，只会用在代表**Master**的对象，存储了被**Sentinel**选出的，用于替换这个**Master**的**Slave**服务器`sentinelRedisInstance`对象的指针。
 
 现在我们总结一下，在一个哨兵实例之中，存在着三类不同作用的字典`dict`数据结构：
 
@@ -630,7 +631,7 @@ repl_backlog_histlen:1048576
 ...
 ```
 
-这里我们可以看到**INFO**命令返回数据中包含了主从集群的各项配置信息以及数据，**Sentinel**则是通过`sentinelRefreshInstanceInfo`这个函数读取**INFO**命令的返回来实现对于**Slave**服务器的发现的。
+这里我们可以看到**INFO**命令返回数据中包含了主从集群的各项配置信息以及数据，包括对应这个**Slave**服务器针对**Master**服务器的复制偏移量`slave_repl_offset`，**Sentinel**则是通过`sentinelRefreshInstanceInfo`这个函数读取**INFO**命令的返回来实现对于**Slave**服务器的发现的。
 
 ```c
 void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info);
@@ -700,6 +701,10 @@ void sentinelReconnectInstance(sentinelRedisInstance *ri)
 在上述的`sentinelReconnectInstance`函数的代码片段之中，我们可以发现如果**Sentinel**服务器尝试向另外一个代表**Sentinel**的`sentinelRedisInstance`建立连接时，只会创建命令连接，而不会创建订阅连接。也就是说**Sentinel**集群之中的服务器节点彼此之间只有一个命令连接。
 
 而这个特性便是前面所说的共享底层网络连接的由来。设想我们有**SentinelA**以及**SentinelB**两个服务器，监控**Master1**以及**Master2**两个服务器。当**SentinelA**通过**Master1**发现了**SentinelB**之后，为**SentinelB**创建一个`sentinelRedisInstance`对象，并通过这个对象建立与**SentinelB**服务器的底层网络连接；后续**SentinleA**又通过**Master2**发现了**SentinelB**，但是此前两台服务器之间已经建立了一条网络连接，我们没有必要为两个服务器再建立一条网络连接，基于这个理由，我们便可以再新的`sentinelRedisInstance`对象上，复用前面已经创建好的网络连接`instanceLink`。
+
+#### 发现机制的其他用途
+
+前面我们可以看到，**Sentine**通过周期性地点**INFO**命令可以用来发现所监控的**Master**服务器对应的**Slave**服务器。除此之外这个机制可以用于刷新**Sentinel**服务器所监控的其他服务器的当前状态。例如每次收到**INFO**命令的返回数据时，**Sentinel**服务器会将当前的时间更新到对应的`sentinelRedisInstance`对象的`info_refresh`字段之中；同时对于**Slave**服务器的返回数据，**Sentinel**也会从中解析出该**Slave**对于**Master**的复制偏移量，并将之更新到对应的`sentinelRedisInstance.slave_repl_offset`字段之中。
 
 ### 故障发现
 
@@ -918,7 +923,52 @@ void sentinelHandleRedisInstance(sentinelRedisInstance *ri)
 
 最后`sentinelGetLeader`函数会检查得票最高的**Sentinel**对象的票数是否过半，如果过半说明该对象便是最终选出的**Leader**，函数返回该对象的运行ID；否则说明暂时没有完成投票，那么会在下一次心跳之中继续调用该接口扫描是否选出了**Leader**。
 
-#### 故障迁移
+而`sentinelFailoverWaitStart`函数则通过调用`sentinelGetLeader`在心跳之中检查自己是否被选举为**Leader**，如果超过`SENTINEL_ELECTION_TIMEOUT`时间后，**Sentinel**发现自己仍然没有被选举为**Leader**，那么便认为这个**Sentinel**选举失败。否则说明自己被选举为**Leader**，那么后续将由这个**Sentinel**服务器负责故障迁移后续的流程，包括将对应**Master**服务器的故障迁移状态`sentinelRedisInstance.failover_state`字段切换为`SENTINEL_FAILOVER_STATE_SELECT_SLAVE`，这表示后续要从**Master**服务器对应的**Slave**服务器之中选择一个服务器将其提升为**Master**服务器。
+
+#### 选择Slave服务器
+
+**Sentinel**会在心跳机制之中，检查对应的**Master**服务器的`sentinelRedisInstance.failover_state`字段的状态，发现这个字段是`SENTINEL_FAILOVER_STATE_SELECT_SLAVE`，便会进入选择**Slave**服务器的流程。
+
+```c
+void sentinelFailoverSelectSlave(sentinelRedisInstance *ri);
+sentinelRedisInstance *sentinelSelectSlave(sentinelRedisInstance *master);
+```
+
+函数`sentinelSelectSlave`会从指定的`master `实例的`sentinelRedisInstance.slaves`字典之中选择出合适的**Slave**服务器来将之提升为**Master**服务器，其收集的逻辑为：
+
+1. 对应的**Slave**服务器不应该处于断开连接、**主观下线**、**客观下线**这些状态。
+2. 在5个**PING**命令周期时间内（定义在`SENTINEL_PING_PERIOD`），该**Slave**有响应过**Sentinel**服务器的**PING**命令。
+3. 在3个**INFO**命令周期时间内（定义在`SENTINEL_INFO_PERIOD`），该**Slave**有响应过**Sentinel**的**INFO**命令。
+4. **Slave**对象上记录的**Master**掉线时间`sentinelRedisInstance.master_link_down_time`不应该超过`(now - master->s_down_since_time) + (master->down_after_period * 10)`。一般来说从**Sentinel**的视角来看**Master**服务器已经处于了**客观下线**的状态的话，那么在**Slave**服务器一侧同样发现**Master**断开连接的时间不会超过10倍的`down_after_period`时间。这里其实是一个潜规则，其中心思想是当**Master**处于不可用的状态时，**Slave**对此的感知可能会之后，但是终究不会超过一定的时间。
+5. **Slave**服务器的`slave_priority`不能为0，否则将会忽略这个**Slave**服务器。
+
+**Sentinel**在收集到满足条件的**Slave**服务器对象后，按照如下的规则对这些对象进行排序：
+
+1. 具有更低的优先级`sentinelRedisInstance.slave_priority`。
+2. 具有更高的已处理复制偏移量`sentinelRedisInstance.slave_repl_offset`。
+3. 按照字典顺序具有更小的运行ID。
+
+按照上述的规则，这个**Sentinel**会在一组候选**Slave**服务器之中选出最佳的**Slave**，准备将其替换为**Master**服务器，记录相关的数据，并将对应的故障迁移的状态`failover_state`切换为`SENTINEL_FAILOVER_STATE_SEND_SLAVEOF_NOONE`，表示将会向对应的**Slave**服务器发送`SLAVEOF NO ONE`，使之从一台**Slave**服务器转换为一个独立的**Redis**服务器。
+
+#### Master服务器迁移
+
+与前面的逻辑相似，**Sentinel**会在心跳之中通过`sentinelFailoverStateMachine`函数检验**Master**对象的迁移状态，如果发现是`SENTINEL_FAILOVER_STATE_SEND_SLAVEOF_NOONE`，那么便会通过`sentinelFailoverSendSlaveOfNoOne`函数向对应的**Slave**服务器发起迁移命令，命令将以事务的形式被发送：
+
+```
+MULTI
+SLOVEOF NO ONE
+CONFIG REWRITE
+CLIENT KILL TYPE normal
+EXEC
+```
+
+这里除了**MULTI**与**EXEC**命令用于封装事务的命令序列之外，另外三条有意义的命令的作用为：
+
+1. `SLOVEOF NO ONE`，正如在前面介绍**主从复制**机制时所描述的，这个命令会使一个**Slave**服务器转化为一台独立的**Redis**服务器，且不在继续复制原来配置的**Master**服务器。
+2. `CONFIG REWRITE`
+3. `CLIENT KILL TYPE normal`
+
+在向被选出的**Slave**服务器发送迁移命令后，**Sentinel**会将当前的迁移状态切换为`SENTINEL_FAILOVER_STATE_WAIT_PROMOTION`，并刷新迁移状态切换的时间戳`sentinelRedisInstance.failover_state_change_time`。
 
 ### 配置回写
 
