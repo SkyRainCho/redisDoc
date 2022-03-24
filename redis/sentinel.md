@@ -232,9 +232,9 @@ typedef struct sentinelRedisInstance {
 | `SRI_MASTER_DOWN`          | 表示某个代表**Sentinel**服务器的`sentineRedisInstance`对象，其所监控的**Master**处于掉线状态。 |
 | `SRI_FAILOVER_IN_PROGRESS` | 只会设置给`SRI_MASTER`的对象，表示这个对象正在进行故障迁移   |
 | `SRI_PROMOTED`             | 只会设置给`SRI_SLAVE`对象，表示在故障迁移流程之中，这个**Slave**服务器被**Sentinel**选择将会提升为**Master**服务器。 |
-| `SRI_RECONF_SENT`          |                                                              |
-| `SRI_RECONF_INPROG`        |                                                              |
-| `SRI_RECONF_DONE`          |                                                              |
+| `SRI_RECONF_SENT`          | 这个标记表示在故障迁移过程之中，已经向该**Slave**服务器发送了**SLAVEOF**命令让其复制新的**Master**。 |
+| `SRI_RECONF_INPROG`        | 这个标记表示在故障迁移过程之中，这个**Slave**服务器正在复制新的**Master**的数据。 |
+| `SRI_RECONF_DONE`          | 这个标记表示在故障迁移过程之中，这个**Slave**服务器已经完成对于新的**Master**数据的复制。 |
 | `SRI_FORCE_FAILOVER`       |                                                              |
 | `SRI_SCRIPT_KILL_SENT`     |                                                              |
 
@@ -965,10 +965,50 @@ EXEC
 这里除了**MULTI**与**EXEC**命令用于封装事务的命令序列之外，另外三条有意义的命令的作用为：
 
 1. `SLOVEOF NO ONE`，正如在前面介绍**主从复制**机制时所描述的，这个命令会使一个**Slave**服务器转化为一台独立的**Redis**服务器，且不在继续复制原来配置的**Master**服务器。
-2. `CONFIG REWRITE`
-3. `CLIENT KILL TYPE normal`
+2. `CONFIG REWRITE`，由于涉及了主从身份的转换，通过这条命令可以强制将**Slave**的当前状态覆盖回写到配置文件之中。
+3. `CLIENT KILL TYPE normal`，通过这条命令，**Sentinel**可以要求这个**Slave**服务器关闭连接到这个服务器上的所有用户客户端的网络连接，防止在迁移的过程之中用户的查询命令干扰了整个流程。这里需要注意的一点是，当前**Sentinel**与**Slave**服务器之间建立的网络连接并不会因为这条命令被关闭，具体**CLIENT**命令的代码实现可以在*src/networking.c*文件之中的`clientCommand`这个函数之中看到。
 
-在向被选出的**Slave**服务器发送迁移命令后，**Sentinel**会将当前的迁移状态切换为`SENTINEL_FAILOVER_STATE_WAIT_PROMOTION`，并刷新迁移状态切换的时间戳`sentinelRedisInstance.failover_state_change_time`。
+在向被选出的**Slave**服务器发送迁移命令后，**Sentinel**会将当前的迁移状态切换为`SENTINEL_FAILOVER_STATE_WAIT_PROMOTION`，表示**Sentinel**正在等待这个**Slave**服务器完成迁移，同时还刷新迁移状态切换的时间戳`sentinelRedisInstance.failover_state_change_time`。
+
+#### 等待迁移完成
+
+**Sentinel**等待迁移完成的工作主要分为两个部分，其一是迁移过程是否超时；其二是检验迁移过程是否成功。
+
+##### 超时验证
+
+**Sentinel**服务器会在心跳逻辑之中，对处于`SENTINEL_FAILOVER_STATE_WAIT_PROMOTION`状态的**Master**周期性地检查迁移是否超时。
+
+```c
+void sentinelFailoverWaitPromotion(sentinelRedisInstance *ri);
+```
+
+在函数`sentinelFailoverWaitPromotion`中会通过`failover_state_change_time`这个时间戳记录的时间来判断迁移是否超时。如果超时没有完成迁移，那么会调用`sentinelAbortFailover`中断此次迁移过程。
+
+##### 成功验证
+
+验证迁移成功则是基于**Sentinel**周期性发送**INFO**命令这个机制来完成的。**INFO**命令的返回数据之中会通报对应的服务器的角色信息，如果是**Master**服务器，那么命令的返回数据之中会有`role:master`这样的数据，反之则会有`role:slave`这样的数据。基于这个基础，**Sentinel**如果发现一个具有`SRI_SLAVE`以及`SRI_PROMOTED`的**Slave**对象，其角色切换成了**Master**，那么便说明对应的**Slave**服务器完成了迁移过程。
+
+接下来**Sentinel**便会将当前的故障迁移状态`failover_state`切换为`SENTINEL_FAILOVER_STATE_RECONF_SLAVES`，这个状态表示**Sentinel**将重新配置其他的**Slave**服务器，要求它们复制这个新的**Master**服务器。
+
+#### 重新配置Slave
+
+**Sentinel**服务器在心跳逻辑之中检测如果迁移状态处于`SENTINEL_FAILOVER_STATE_RECONF_SLAVES`时，会通过`sentinelFailoverReconfNextSlave`函数，要求这个`master`的其他**Slave**服务器去复制新的**Master**服务器。
+
+```c
+void sentinelFailoverReconfNextSlave(sentinelRedisInstance *master);
+```
+
+这个函数会遍历`master`对象对应的`sentinelRedisInstance.slaves`字典，其中会跳过已经选做故障迁移的带有`SRI_PROMOTED`标记的**Slave**服务器对象，并向其他的**Slave**服务器发送**SLAVEOF**命令，要求其复制新的**Master**，并为其在`sentinelRedisInstance.flags`上设置`SRI_RECONF_SENT`标记，表示已经向其发送了**SLAVEOF**命令。
+
+接下来**Sentinel**服务器会继续在周期性的**INFO**命令返回数据之中检验这些**Slave**服务器的状态。如果通过**INFO**命令返回数据上报的`slave_master_host`以及`slave_master_port`与被提升为**Master**的那台服务器相同，说明**SLAVEOF**命令已经生效，这台**Slave**服务器已经开始复制新的**Master**，此时将对应的`sentinelRedisInstance.flags`字段设置为`SRI_RECONF_INPROG`，表明该服务器的复制正在进行中。
+
+因为复制新的**Master**需要一定时间，因此**Sentinel**服务器还会继续在周期性的**INFO**命令的返回数据之中校验那些处于`SRI_RECONF_INPROG`状态的**Slave**服务器，检查其是否已经完成对于新的**Master**服务器的复制。在前面我们介绍主从复制时有提到过，当一个**Slave**服务器完成对于**Master**数据的复制之后，会将`redisServer.repl_state`这个字段设置为`REPL_STATE_CONNECTED`，这样在**INFO**命令的返回数据之中就会出现一条`master_link_status:up`的信息，**Sentinel**在检查到这个返回后，便会将这个对象的`sentinelRedisInstance.flags`字段设置为`SRI_RECONF_DONE`，表示这个服务器的复制已经完成。
+
+#### 迁移完成
+
+最后**Sentinel**服务器会周期性地调用`sentinelFailoverDetectEnd`函数来检测原**Master**的**Slave**服务器是否已经全部完成了对新**Master**的复制，如果有个别的**Slave**超过一定时间`sentinelRedisInstance.failover_timeout`，则会向这个**Slave**重新发送**SLAVEOF**命令强制重新复制。
+
+当检测到所有的**Slave**都完成了复制之后，便会将故障迁移状态切换至`SENTINEL_FAILOVER_STATE_UPDATE_CONFIG`，这样**Sentinel**服务器便会通过`sentinelFailoverSwitchToPromotedSlave`函数调用`sentinelResetMasterAndChangeAddress`将这一组主从集群之中的**Master** 对象切换成新的迁移之后的**Master**服务器，并重新构建这个新的**Master** 对象的`sentinelRedisInstance.slaves`字典，完成整个故障迁移的流程。
 
 ### 配置回写
 
