@@ -138,7 +138,12 @@ struct sentinelState {
 } sentinel;
 ```
 
-在`sentinelState`这个数据结构之中最重要的字段便是`sentinelState.masters`这个哈希表，这里存储了当前这个哨兵实例所监控的**Master**实例。而这些被监控的实例，在哨兵模式之中是使用`sentinelRedisInstance`这个数据结构来表示的：
+这其中：
+
+1. `sentinelState.myid`，存储了标记这个哨兵节点的唯一运行ID。
+2. `sentinelState.current_epoch`，存储这个哨兵节点的当前纪元，所谓纪元对应于前面我们在介绍的**Raft**算法的任期`Term`概念。
+3. `sentinelState.masters`，这个哈希表存储了当前这个哨兵实例所监控的**Master**实例。而这些被监控的实例。
+4. `sentinelState.announce_id`以及`sentinelState.announce_port`这两个字段存储了当前哨兵实例对外宣告的连接地址。
 
 ### sentinelRedisInstance数据
 
@@ -150,20 +155,14 @@ typedef struct sentinelRedisInstance {
     uint64_t config_epoch;
     sentinelAddr *addr;
     instanceLink *link;
-    mstime_t last_pub_time;   /* Last time we sent hello via Pub/Sub. */
-    mstime_t last_hello_time; /* Only used if SRI_SENTINEL is set. Last time
-                                 we received a hello from this Sentinel
-                                 via Pub/Sub. */
-    mstime_t last_master_down_reply_time; /* Time of last reply to
-                                             SENTINEL is-master-down command. */
-    mstime_t s_down_since_time; /* Subjectively down since time. */
-    mstime_t o_down_since_time; /* Objectively down since time. */
-    mstime_t down_after_period; /* Consider it down after that period. */
-    mstime_t info_refresh;  /* Time at which we received INFO output from it. */
-    dict *renamed_commands;     /* Commands renamed in this instance:
-                                   Sentinel will use the alternative commands
-                                   mapped on this table to send things like
-                                   SLAVEOF, CONFING, INFO, ... */
+    mstime_t last_pub_time;
+    mstime_t last_hello_time;
+    mstime_t last_master_down_reply_time;
+    mstime_t s_down_since_time;
+    mstime_t o_down_since_time;
+    mstime_t down_after_period;
+    mstime_t info_refresh;
+    dict *renamed_commands;
 
     /* Role and the first time we observed it.
      * This is useful in order to delay replacing what the instance reports
@@ -172,43 +171,37 @@ typedef struct sentinelRedisInstance {
      * we do silly things. */
     int role_reported;
     mstime_t role_reported_time;
-    mstime_t slave_conf_change_time; /* Last time slave master addr changed. */
+    mstime_t slave_conf_change_time;
 
     /* Master specific. */
-    dict *sentinels;    /* Other sentinels monitoring the same master. */
-    dict *slaves;       /* Slaves for this master instance. */
-    unsigned int quorum;/* Number of sentinels that need to agree on failure. */
-    int parallel_syncs; /* How many slaves to reconfigure at same time. */
-    char *auth_pass;    /* Password to use for AUTH against master & slaves. */
+    dict *sentinels;
+    dict *slaves;
+    unsigned int quorum;
+    int parallel_syncs;
+    char *auth_pass;
 
     /* Slave specific. */
-    mstime_t master_link_down_time; /* Slave replication link down time. */
-    int slave_priority; /* Slave priority according to its INFO output. */
-    mstime_t slave_reconf_sent_time; /* Time at which we sent SLAVE OF <new> */
-    struct sentinelRedisInstance *master; /* Master instance if it's slave. */
-    char *slave_master_host;    /* Master host as reported by INFO */
-    int slave_master_port;      /* Master port as reported by INFO */
-    int slave_master_link_status; /* Master link status as reported by INFO */
-    unsigned long long slave_repl_offset; /* Slave replication offset. */
+    mstime_t master_link_down_time;
+    int slave_priority;
+    mstime_t slave_reconf_sent_time;
+    struct sentinelRedisInstance *master;
+    char *slave_master_host;
+    int slave_master_port;
+    int slave_master_link_status;
+    unsigned long long slave_repl_offset;
     /* Failover */
-    char *leader;       /* If this is a master instance, this is the runid of
-                           the Sentinel that should perform the failover. If
-                           this is a Sentinel, this is the runid of the Sentinel
-                           that this Sentinel voted as leader. */
-    uint64_t leader_epoch; /* Epoch of the 'leader' field. */
-    uint64_t failover_epoch; /* Epoch of the currently started failover. */
-    int failover_state; /* See SENTINEL_FAILOVER_STATE_* defines. */
+    char *leader;
+    uint64_t leader_epoch;
+    uint64_t failover_epoch;
+    int failover_state;
     mstime_t failover_state_change_time;
-    mstime_t failover_start_time;   /* Last failover attempt start time. */
-    mstime_t failover_timeout;      /* Max time to refresh failover state. */
-    mstime_t failover_delay_logged; /* For what failover_start_time value we
-                                       logged the failover delay. */
-    struct sentinelRedisInstance *promoted_slave; /* Promoted slave instance. */
-    /* Scripts executed to notify admin or reconfigure clients: when they
-     * are set to NULL no script is executed. */
+    mstime_t failover_start_time;
+    mstime_t failover_timeout;
+    mstime_t failover_delay_logged;
+    struct sentinelRedisInstance *promoted_slave;
     char *notification_script;
     char *client_reconfig_script;
-    sds info; /* cached INFO output */
+    sds info;
 } sentinelRedisInstance;
 ```
 
@@ -235,16 +228,36 @@ typedef struct sentinelRedisInstance {
 | `SRI_RECONF_SENT`          | 这个标记表示在故障迁移过程之中，已经向该**Slave**服务器发送了**SLAVEOF**命令让其复制新的**Master**。 |
 | `SRI_RECONF_INPROG`        | 这个标记表示在故障迁移过程之中，这个**Slave**服务器正在复制新的**Master**的数据。 |
 | `SRI_RECONF_DONE`          | 这个标记表示在故障迁移过程之中，这个**Slave**服务器已经完成对于新的**Master**数据的复制。 |
-| `SRI_FORCE_FAILOVER`       |                                                              |
-| `SRI_SCRIPT_KILL_SENT`     |                                                              |
+| `SRI_FORCE_FAILOVER`       | 我们可以向**Sentinel**显式地发送**SENTINEL FAILOVER**命令来强制对某一个**Master**服务器进行故障迁移，此时会将对应这个服务器的对象设置上这个标记。 |
+| `SRI_SCRIPT_KILL_SENT`     | 当一个被**Sentinel**监控的**Redis**服务器因为执行具有逻辑问题的查询脚本而导致**BUSY**时，**Sentinel**会向这个对应的服务器发送**SCRIPT KILL**命令来杀死执行之中的脚本，而此时对应这个服务器测`sentinelRedisInstance`对象就会被设置上这个标记。 |
 
+`sentinelRedisInstance`这个结构体之中较为重要的通用数据包含：
 
+1. `sentinelRedisInstance.flags`，这个标记以掩码的形式存储这对象所对应的**Redis**服务器的当前的状态，具体的掩码类型为*src/sentinel.c*文件之中定义的`SRI_*`的这些掩码定义，其含义可以参见上面的表格。
+2. `sentinleRedisInstance.name`以及`sentinelRedisInstance.runid`，这两个字段存储这个对象对应的**Redis**服务器的名字以及运行ID，用于唯一标记这个**Redis**服务器。
+3. `sentinelRedisInstance.config_epoch`
+4. `sentinelRedisInstance.addr`以及`sentinleRedisInsance.link`，这两个字段记录了这个**Redis**服务器对象的网络地址信息以及**Sentinel**服务器与该**Redis**服务器之间的连接对象`instanceLink`。
+5. `sentinelRedisInstance.last_pub_time`以及`sentinelRedisInstance.last_hello_time`，这两个时间戳字段分别记录了该**Sentinel**服务器最近一次向这个`sentinelRedisInstance`对应的服务器的发布订阅频道上发布消息的时间戳以及最近一次接收到这个`sentinelRedisInstance`对象对应的服务器发来的**Hello**消息的时间戳。
 
 #### Master对应数据
 
 #### Slave对应数据
 
 #### 故障迁移对应数据
+
+在*src/sentinel.c*源文件之中定义了一系列的枚举来表示在故障迁移之中集群所处的状态：
+
+| 枚举定义                                     | 含义                                                         |
+| -------------------------------------------- | ------------------------------------------------------------ |
+| `SENTINEL_FAILOVER_STATE_NONE`               | 表示当前没有在处理之中的故障迁移流程。                       |
+| `SENTINEL_FAILOVER_STATE_WAIT_START`         | 表示**Sentinel**在判断集群之中的**Master**被判定客观下线之后，等待故障迁移开始的状态，此时监控同一**Master**的**Sentinel**集群会基于**Raft**算法开始进行**Leader**的选举。 |
+| `SENTINEL_FAILOVER_STATE_SELECT_SLAVE`       | 这个状态表示被选举为**Leader**的**Sentinel**服务器将会在**Master**对应的所有**Slave**服务器之中选择一个，将其提升为新的**Master**。 |
+| `SENTINEL_FAILOVER_STATE_SEND_SLAVEOF_NOONE` | 这个状态表示已经向被选择为候补**Master**的服务器发送了**SLAVE NOONE**命令，使其成为一个独立的**Master**服务器。 |
+| `SENTINEL_FAILOVER_STATE_WAIT_PROMOTION`     |                                                              |
+| `SENTINEL_FAILOVER_STATE_RECONF_SLAVES`      |                                                              |
+| `SENTINEL_FAILOVER_STATE_UPDATE_CONFIG`      |                                                              |
+
+
 
 1. `sentinelRedisInstance.leader`，如果对应一个表示**Master**的对象，这里记录应该执行的故障转移，也就是**Leader**的运行ID；如果对应一个表示**Sentinel**的对象，那么这里记录的是这个对象把选票投给了哪个**Sentinel**作为**Leader**
 2. `sentinelRedisInstance.leader_epoch`，对应**Leader**的纪元。
@@ -265,39 +278,36 @@ typedef struct sentinelRedisInstance {
 
 ```c
 typedef struct instanceLink {
-    int refcount;          /* Number of sentinelRedisInstance owners. */
-    int disconnected;      /* Non-zero if we need to reconnect cc or pc. */
-    int pending_commands;  /* Number of commands sent waiting for a reply. */
-    redisAsyncContext *cc; /* Hiredis context for commands. */
-    redisAsyncContext *pc; /* Hiredis context for Pub / Sub. */
-    mstime_t cc_conn_time; /* cc connection time. */
-    mstime_t pc_conn_time; /* pc connection time. */
-    mstime_t pc_last_activity; /* Last time we received any message. */
-    mstime_t last_avail_time; /* Last time the instance replied to ping with
-                                 a reply we consider valid. */
-    mstime_t act_ping_time;   /* Time at which the last pending ping (no pong
-                                 received after it) was sent. This field is
-                                 set to 0 when a pong is received, and set again
-                                 to the current time if the value is 0 and a new
-                                 ping is sent. */
-    mstime_t last_ping_time;  /* Time at which we sent the last ping. This is
-                                 only used to avoid sending too many pings
-                                 during failure. Idle time is computed using
-                                 the act_ping_time field. */
-    mstime_t last_pong_time;  /* Last time the instance replied to ping,
-                                 whatever the reply was. That's used to check
-                                 if the link is idle and must be reconnected. */
-    mstime_t last_reconn_time;  /* Last reconnection attempt performed when
-                                   the link was down. */
+    int refcount;
+    int disconnected;
+    int pending_commands;
+    redisAsyncContext *cc;
+    redisAsyncContext *pc;
+    mstime_t cc_conn_time;
+    mstime_t pc_conn_time;
+    mstime_t pc_last_activity;
+    mstime_t last_avail_time;
+    mstime_t act_ping_time;
+    mstime_t last_ping_time;
+    mstime_t last_pong_time;
+    mstime_t last_reconn_time;
 } instanceLink;
 ```
 
 在这个数据结构之中，使用前面我们在介绍Hiredis时介绍的异步连接`redisAsyncContext`来表示哨兵实例与*Redis*实例之间建立的连接，正如前面介绍的需要建立两个网络连接：
 
-1. `instanceLink.cc`用于表示命令连接。
-2. `instanceLink.pc`用于表示定于连接。
+1. `instanceLink.cc`用于表示命令连接；`instanceLink.cc_conn_time`则用于记录命令连接建立时的时间戳。
+2. `instanceLink.pc`用于表示订阅连接；`instanceLink.pc_conn_time`用于记录订阅连接建立时的时间戳；`instanceLink.pc_last_activity`这个时间戳字段则是记录了**Sentinel**最近一次从这个订阅连接上收到消息数据的时间戳。
 
-除此之外，`instanceLink.refcount`字段用于表示这个连接对象的引用计数，这也就意味着多个`sentinelRedisInstance`会引用相同的`instanceLink`连接对象。这主要是因为哨兵实例会在`sentinel.masters`关联其监控的所有实例；而对于**Master**实例对象`sentinelRedisInstance`会用通过`sentinelRedisInstance.sentinels`来反向关联监控它的哨兵对象实例。因此在这里便有了共享`instanceLink`对象的必要性。
+除了上述两个与对应**Redis**服务器的异步连接之外，其余的字段分别表示：
+
+1. `instanceLink.refcount`，用于表示这个`instanceLink`连接对象的引用计数，这也就以为这个`instanceLink`连接对象可以被多个`sentinelRedisInstance`对象所共享，其中具体的原因我们后续会详细介绍。
+2. `instanceLink.disconnected`，用于表示这个连接对象当前是否处于连接断开的状态，当我们通过`instanceLinkClostConnection`函数关闭连接或这个网络连接发生错误时，这个字段会被设置为1。
+3. `instanceLink.penging_commands`，记录这个连接对象上命令连接之中挂起的命令数量，由于**Sentinel**与其他**Redis**服务器之间采用的是异步的网络连接，因此在向该服务器的命令连接上发送一条命令时，会增加该命令计数的数值；当收到命令的返回触发对应回调函数时，则会减少该命令计数的数值。
+4. `instanceLink.last_avail_time`，记录在这条连接对象最近一次收到**PING**命令返回的时间戳，记录**Sentinel**能感知到的连接对象对应服务器最近的可用或者活跃时间。
+5. `instanceLink.act_ping_time`，记录当前在这个连接对象上发起**PING**命令的时间，当收到**PING**命令的返回后，这个时间戳会被清零。
+6. `instanceLink.last_ping_time`，用于上一次发起**PING**命令的时间戳，会在每次发送**PING**命令是被更新。
+7. `instanceLink.last_pong_time`，用于记录最近一次收到**PONG**返回的时间戳，与`instanceLink.last_avail_time`这个时间戳只会在返回**PONG**，**LOADING**以及**MASTERDOWN**返回时被更新，而`last_pong_time`这个字段只要收到**PING**返回便会被更新，无论是否返回正常的状态。
 
 下面我们来简单地介绍一下关于`instanceLink`对象上若干操作函数：
 ```c
