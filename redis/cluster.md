@@ -186,7 +186,7 @@ typedef struct clusterState {
 
 ### 初始化
 
-这里也需要解释一下*nodes.conf*这个配置文件在**Redis**集群之中的作用。这个文件之中最重要的配置便是当前集群之中所知的所有的实例配置信息。
+这里也需要解释一下*nodes.conf*这个配置文件在**Redis**集群之中的作用。这个配置文件并不是一个用户可以编辑的文件，而是每次集群信息发生变换时，由**Redis**进程自动保存的文件。这个文件之中存储了集群之中已知的各个分片节点的连接信息、状态信息等重要信息。这样当集群之中的**Redis**进程启动后便可以通过这个配置文件加载整个集群的信息。
 
 ```c
 int clusterLoadConfig(char *filename);
@@ -198,29 +198,52 @@ void clusterInit(void);
 void clusterReset(int hard);
 ```
 
-`clusterLockConfig`这个函数
-
-`clusterLoadConfig`这个函数用于从集群配置文件之中加载当前分片对应的配置信息，这个配置文件默认的文件名被定义在*src/server.h*头文件之中：
+这个配置文件默认的文件名被定义在*src/server.h*头文件之中：
 
 ```c
 #define CONFIG_DEFAULT_CLUSTER_CONFIG_FILE "nodes.conf"
 ```
 
-文件之中最为重要的的配置数据便是集群之中节点的配置信息，`clusterLoadConfig`函数会遍历配置文件之中每一个分片实例的配置信息，使用该信息构造分片对应的`clusterNode`数据，每一行配置信息首先会标记分片实例的唯一标识，网络连接信息，以及对应的标记信息，这其中包括：
+首先我们来看一下一个典型的*nodes.conf*这个配置文件的内容：
 
-| 标记       | 含义                                 | 对应Flags类型             |
-| ---------- | ------------------------------------ | ------------------------- |
-| myself     | 该行为启动实例自身的配置信息         | `CLUSTER_NODE_MYSELF`     |
-| master     | 该行为一个主分片实例的配置信息       | `CLUSTER_NODE_MASTER`     |
-| slave      | 该行为一个从分片实例的配置信息       | `CLUSTER_NODE_SLAVE`      |
-| fail?      | 表示该分片处于主观下线的状态         | `CLUSTER_NODE_PFAIL`      |
-| fail       | 表示该分片处于客观下线的状态         | `CLUSTER_NODE_FAIL`       |
-| handshake  | 表示                                 | `CLUSTER_NODE_HANDSHAKE`  |
-| noaddr     | 表示当前还暂时不知道该分片的地址信息 | `CLUSTER_NODE_NOADDR`     |
-| nofailover |                                      | `CLUSTER_NODE_NOFAILOVER` |
-| noflags    |                                      |                           |
+``` bash
+617f92606a9204d52a1cc12f35cdc4f05fede2c4 127.0.0.1:30003@40003 master - 0 1690185189137 3 connected 6554-9829
+428fdf546d6c486425552ad3df00503407b1219b 127.0.0.1:30010@40010 slave 617f92606a9204d52a1cc12f35cdc4f05fede2c4 0 1690185189137 10 connected
+418f85d8aef01c177baca2dcd88f431602bab251 127.0.0.1:30004@40004 master - 0 1690185189137 4 connected 9830-13106
+76fda0b35614df76eb2904b1c797b155764d7adb 127.0.0.1:30007@40007 slave 5eb10f1300857a0363f802cc756e455533ddb78b 0 1690185189137 7 connected
+8883e968f680b2debd4291b65dac2786d68ed7d1 127.0.0.1:30001@40001 myself,master - 0 1690185189000 1 connected 0-3276
+230ffd9704360afb01d9225469cfedb26caf1001 127.0.0.1:30008@40008 slave 418f85d8aef01c177baca2dcd88f431602bab251 0 1690185189137 8 connected
+46b42185c5a887797ffb41d26bdc2ce5ff823bc5 127.0.0.1:30006@40006 slave 8883e968f680b2debd4291b65dac2786d68ed7d1 0 1690185189036 6 connected
+8e98d6a447ad07f6e898d9b3a93d062cd9c07643 127.0.0.1:30009@40009 slave 7a4110a155651eb31e8263eba7da0e9ca4a34e8e 0 1690185189538 9 connected
+5eb10f1300857a0363f802cc756e455533ddb78b 127.0.0.1:30002@40002 master - 0 1690185189137 2 connected 3277-6553
+7a4110a155651eb31e8263eba7da0e9ca4a34e8e 127.0.0.1:30005@40005 master - 0 1690185189137 5 connected 13107-16383
+vars currentEpoch 10 lastVoteEpoch 0
+```
 
+`clusterLoadConfig`这个函数用于从集群配置文件之中加载集群分片对应的配置信息，文件之中最为重要的的配置数据便是集群之中各个节点的配置信息，`clusterLoadConfig`函数会遍历配置文件之中每一个分片实例的配置信息，使用该信息创建分片对应的`clusterNode`数据，每一行配置信息中会包含如下的数据：
 
+1. 首先是标记分片实例的唯一标识，这个数据对应`clusterNode.name`字段之中的数据。
+2. 网络连接信息，这里面包含了三个连接数据，以`ip:port@busport`的形式组成的，这其中`port`端口用来处理分片节点处理客户端的查询命令，`busport`端口被称为**集群总线端口**，这是一个节点对节点的通信通道，使用二进制协议，由于带宽和处理时间短，它更适合在分片节点之间交换信息。
+3. 分片节点的标记信息，用于表示这个节点对应的状态，这些标记信息包括：
+   1. `myself`，对应`CLUSTER_NODE_MYSELF`，表明这个分片节点就是当前启动的实例自己。
+   2. `master`，对应`CLUSTER_NODE_MASTER`，表明这个分片是一个`master`节点。
+   3. `slave`，对应`CLUSTER_NODE_SLAVE`，表明这个分片是一个`slave`节点。
+   4. `fail?`，对应`CLUSTER_NODE_PFAIL`，表明这个分片实例在当前实例的角度上处于主观下线的状态。
+   5. `fail`，对应`CLUSTER_NODE_FAIL`，表明这个分片实例处于客观下线的状态。
+   6. `handshake`
+   7. `noaddr`
+   8. `nofailover`
+   9. `noflags`
+4. 对于一个`slave`分片节点，这里会存储其对应的`master`节点的唯一标识符，对应`clusterNode.slaveof`字段；如果这是一个`master`这里则是会使用一个`-`字符进行占位。
+5. 记录这个分片发送**PING**命令的时间戳，对应于`clusterNode.ping_sent`字段。
+6. 记录这个分片接受到**PONG**命令的时间戳，对应于`clusterNode.pong_received`字段。
+7. 记录这个分片的配置纪元，对应`clusterNode.configEpoch`字段。
+8. 记录这个分片是否处于连接状态，有`connected`以及`disconnected`两种状态。
+9. 如果这个分片是一个`master`节点，那么最后会以一个闭区间的形式存储这个分片负责维护的`slot`段，例如`13107-16383`表示这个分片之中存储着属于从`13107`到`16383`这些`slot`的**Key**。
+
+在这个集群配置文件之中，除了记录分片节点的配置数值之外，还通过行首的`vars`关键字，规定了一个特殊的配置行，在这里面存储了集群的当前纪元，对应于`clusterState.currentEpoch`字段；以及上一次的投票纪元，对应于`clusterState.lastVoteEpoch`字段。
+
+上述的这些集群配置信息都会通过`clusterLoadConfig`这个函数接口进行解析，并加载到**Redis**的内存之中。
 
 `clusterLockConfig`这个函数会调用`flock`系统调用，对集群配置文件尝试添加文件锁，之所以这么做，是因为我们经常需要在有一个新版集群配置数据的时候原地更新*nodes.conf*这个配置文件，重新打开这个文件，并对这个文件进行原地写入。如果给定的配置文件不存在，那么**Redis**则会首先创建一个空的文件出来，并对该文件调用`flock`系统调用进行加锁操作，这个加锁操作是以`LOCK_EX|LOCK_NB`的策略进行的，也就是会独占这个配置文件的锁，同时当有其他进程已经锁住该文件的时候，进程不会阻塞在这里等待该锁被释放。
 
