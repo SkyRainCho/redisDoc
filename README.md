@@ -50,3 +50,9 @@
 * [哨兵模式](redis/sentinel.md)
 * [Redis集群](redis/cluster.md)
 
+## Redis发布说明
+* [5.0版本](releaseNotes/5.0/README.md)
+* [6.0版本](releaseNotes/6.0/README.md)
+* [6.2版本](releaseNotes/6.2/README.md)
+* [7.0版本](releaseNotes/7.0/README.md)
+* [7.2版本](releaseNotes/7.2/README.md)
